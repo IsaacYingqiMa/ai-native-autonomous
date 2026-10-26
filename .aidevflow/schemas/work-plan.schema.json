@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aidevflow.local/schemas/work-plan-v1.json",
+  "title": "AIDevFlow Work Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "task_id", "items"],
+  "properties": {
+    "schema": { "const": "aidevflow/work-plan-v1" },
+    "task_id": { "type": "string", "minLength": 1 },
+    "projections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "row_id", "source_kind", "source_id"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "row_id": {"type": "string", "minLength": 1},
+          "source_kind": {"enum": ["work_item", "check", "acceptance"]},
+          "source_id": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "done_criteria"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$" },
+          "title": { "type": "string", "minLength": 1 },
+          "done_criteria": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+          "depends_on": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+          "acceptance_items": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+        }
+      }
+    }
+  }
+}

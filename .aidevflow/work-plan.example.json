@@ -1,0 +1,31 @@
+{
+  "schema": "aidevflow/work-plan-v1",
+  "task_id": "REPLACE-WITH-GATE-TASK-ID",
+  "items": [
+    {
+      "id": "W1",
+      "title": "First bounded implementation outcome",
+      "done_criteria": [
+        "Describe an observable result that can be reviewed independently."
+      ],
+      "depends_on": [],
+      "acceptance_items": ["REQ-001"]
+    },
+    {
+      "id": "W2",
+      "title": "Second bounded implementation outcome",
+      "done_criteria": [
+        "Describe the evidence required before this work item can be completed."
+      ],
+      "depends_on": ["W1"],
+      "acceptance_items": ["REQ-001"]
+    }
+  ],
+  "projections": [
+    {"path": "specs/task/feature/TASK-feature.md", "row_id": "TASK-feature-实现", "source_kind": "work_item", "source_id": "W1"},
+    {"path": "specs/task/feature/TASK-feature.md", "row_id": "TASK-feature-集成", "source_kind": "work_item", "source_id": "W2"},
+    {"path": "specs/checklist/feature/CHK-feature.md", "row_id": "CHK-feature-FUNC-验收", "source_kind": "check", "source_id": "CHECK-feature"},
+    {"path": "specs/checklist/feature/CHK-feature.md", "row_id": "CHK-feature-REG-回归", "source_kind": "check", "source_id": "CHECK-regression"},
+    {"path": "specs/requirement/feature/REQ-feature.md", "row_id": "REQ-001", "source_kind": "acceptance", "source_id": "REQ-001"}
+  ]
+}

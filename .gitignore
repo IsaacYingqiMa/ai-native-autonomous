@@ -1,0 +1,17 @@
+.aidevflow/runs/
+.aidevflow/bundles/
+.aidevflow/maintenance/
+.aidevflow/active-run.json
+.aidevflow/manifest.json
+.aidevflow/events.jsonl
+.aidevflow/archive/
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.test-tmp/
+docs/
+examples/
+test/
+.claude/skills/zsspec-*
+bash.exe.stackdump

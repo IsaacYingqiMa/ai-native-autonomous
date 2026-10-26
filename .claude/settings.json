@@ -1,0 +1,89 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(.aidevflow/**)",
+      "Edit(aidevflow/**)",
+      "Edit(scripts/**)",
+      "Edit(.claude/settings.json)",
+      "Edit(evals/acceptance/**)"
+    ]
+  },
+  "hooks": {
+    "SubagentStart": [
+      {
+        "matcher": "^aidevflow-(intent-analyst|contract-planner|independent-verifier)$",
+        "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-agent", "timeout": 15}]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "^aidevflow-(intent-analyst|contract-planner|independent-verifier)$",
+        "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-agent", "timeout": 15}]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-method", "timeout": 15}]
+      },
+      {
+        "matcher": "SubagentHandback",
+        "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-agent", "timeout": 15}]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" guard-bash",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" guard-bash",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" guard",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" resume",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" stop",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "aidevflow/verifier-verdict-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "task_id", "spec_version", "bundle_sha256", "items", "risks"],
+  "properties": {
+    "schema": {"const": "aidevflow/verifier-verdict-v1"},
+    "task_id": {"type": "string", "minLength": 1},
+    "spec_version": {"type": "string", "minLength": 1},
+    "bundle_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "items": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["id", "verdict", "evidence", "reason"], "properties": {"id": {"type": "string"}, "verdict": {"enum": ["pass", "fail", "blocked"]}, "evidence": {"type": "array", "items": {"type": "string"}}, "reason": {"type": "string"}}}},
+    "risks": {"type": "array", "items": {"type": "string"}}
+  }
+}

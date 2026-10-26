@@ -1,0 +1,48 @@
+{
+  "schema": "aidevflow/contract-v1",
+  "task_id": "SAMPLE-001",
+  "title": "Sample feature task",
+  "method": {
+    "name": "zsspec",
+    "stages": {
+      "design": ["zsspec-spec", "zsspec-test-gen", "zsspec-verify"],
+      "build": ["zsspec-apply"],
+      "review": ["zsspec-code-review", "zsspec-done"]
+    }
+  },
+  "max_repair_attempts": 3,
+  "work_plan_required": true,
+  "test_timeout_seconds": 300,
+  "code_paths": ["src/**", "app/**", "backend/**", "frontend/src/**"],
+  "design_artifacts": [
+    "specs/requirement/feature/REQ-feature.md",
+    "specs/design/feature/DES-feature-后端.md",
+    "specs/task/feature/TASK-feature.md",
+    "specs/checklist/feature/CHK-feature.md"
+  ],
+  "test_files": ["tests/test_feature.py"],
+  "red_test_files": ["tests/test_feature.py"],
+  "test_commands": {
+    "red": ["python", "-m", "pytest", "{target}", "-q"],
+    "green": ["python", "-m", "pytest", "{target}", "-q"],
+    "regression": ["python", "-m", "pytest", "tests", "-q"]
+  },
+  "acceptance_items": [
+    {"id": "REQ-001", "criterion": "Replace this with an observable acceptance criterion."}
+  ],
+  "required_checks": [
+    {"id": "CHECK-feature", "suite": "green", "target": "tests/test_feature.py", "acceptance_items": ["REQ-001"]},
+    {"id": "CHECK-regression", "suite": "regression", "acceptance_items": ["REQ-001"]}
+  ],
+  "routing": {
+    "acceptance_test_failure": {"to": "build"},
+    "review_finding": {"to": "build"},
+    "spec_ambiguity": {"to": "needs_human"},
+    "integrity_mismatch": {"to": "needs_human"}
+  },
+  "verifier": {
+    "required": true,
+    "input_policy": "bundle-only",
+    "required_fields": ["task_id", "spec_version", "items", "risks"]
+  }
+}
