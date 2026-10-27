@@ -290,7 +290,7 @@ class IntakeReceiptTests(GateFixture):
     def test_handback_result_is_preserved_over_closing_text(self):
         common = {"session_id": "s", "agent_id": "a", "agent_type": "aidevflow-intent-analyst"}
         capture_event(self.root, {**common, "hook_event_name": "SubagentStart"})
-        capture_event(self.root, {**common, "hook_event_name": "PostToolUse", "tool_input": {"message": json.dumps(self._draft())}})
+        capture_event(self.root, {**common, "hook_event_name": "PostToolUse", "tool_name": "SubagentHandback", "tool_input": {"message": json.dumps(self._draft())}})
         capture_event(self.root, {**common, "hook_event_name": "SubagentStop", "last_assistant_message": '{"closing":"done"}'})
         self._write_json("draft.json", self._draft())
         self.gate.record_intent("draft.json")

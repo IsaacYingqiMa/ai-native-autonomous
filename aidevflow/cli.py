@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--draft", required=True, help="generated contract JSON path relative to target repository")
 
     sub.add_parser("status", help="show active workflow state")
+    sub.add_parser("doctor", help="read-only Claude observer preflight; does not dispatch agents")
     sub.add_parser("sync-projections", help="project Gate state into registered generated-document status cells")
     resume = sub.add_parser("resume-run", help="resume human handling only after an explicit user instruction")
     resume.add_argument("--by", required=True)
@@ -114,6 +115,9 @@ def main(argv: list[str] | None = None) -> int:
             result = gate.register_contract(args.draft)
         elif args.command == "status":
             result = gate.status()
+        elif args.command == "doctor":
+            from .diagnostics import doctor
+            result = doctor(Path(args.root))
         elif args.command == "sync-projections":
             result = gate.sync_projections()
         elif args.command == "resume-run":
@@ -160,12 +164,14 @@ def main(argv: list[str] | None = None) -> int:
         else:
             parser.error("unknown command")
         _json(result)
+        if args.command == "doctor" and not result["ok"]:
+            return 1
         if args.command == "run-tests" and not (result["valid_red"] if args.suite == "red" else result["passed"]):
             return 1
         return 0
     except GateError as exc:
         try:
-            if gate.active_path.is_file():
+            if args.command != "doctor" and gate.active_path.is_file():
                 from .gate import read_json
                 task_id = read_json(gate.active_path).get("task_id")
                 if isinstance(task_id, str):

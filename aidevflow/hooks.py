@@ -180,6 +180,7 @@ def main() -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     action = sys.argv[1] if len(sys.argv) > 1 else "guard"
+    observational = action in ("trace-agent", "trace-method", "stop")
     root = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd()).resolve()
     if action == "resume":
         return resume(root)
@@ -189,17 +190,17 @@ def main() -> int:
     try:
         raw = sys.stdin.buffer.read()
     except (AttributeError, OSError) as exc:
-        return _input_error(root, b"", "stdin_read_error", str(exc))
+        return _input_error(root, b"", "stdin_read_error", str(exc), block=not observational)
     try:
-        text = raw.decode("utf-8")
+        text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
-        return _input_error(root, raw, "utf8_decode_error", f"byte_offset={exc.start}")
+        return _input_error(root, raw, "utf8_decode_error", f"byte_offset={exc.start}", block=not observational)
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        return _input_error(root, raw, "json_decode_error", f"line={exc.lineno} column={exc.colno} position={exc.pos}")
+        return _input_error(root, raw, "json_decode_error", f"line={exc.lineno} column={exc.colno} position={exc.pos}", block=not observational)
     if not isinstance(payload, dict):
-        return _input_error(root, raw, "invalid_payload_shape", "top_level_must_be_object")
+        return _input_error(root, raw, "invalid_payload_shape", "top_level_must_be_object", block=not observational)
     if action == "stop":
         return stop_check(root, payload)
     if action == "trace-method":
@@ -213,7 +214,11 @@ def main() -> int:
         from .agents import capture_event
         try:
             result = capture_event(root, payload)
-        except (GateError, OSError, ValueError) as exc:
+        except (GateError, OSError, ValueError, KeyError, TypeError) as exc:
+            try:
+                _event(root, "agent_observer_error", error_type=type(exc).__name__, detail=str(exc))
+            except OSError:
+                pass
             print(f"AIDevFlow agent receipt could not be captured: {exc}", file=sys.stderr)
             return 0  # Gate rejects missing receipts; never trap an agent in Stop.
         if result is not None:
@@ -236,7 +241,7 @@ def main() -> int:
     return guard(payload, root)
 
 
-def _input_error(root: Path, raw: bytes, error_type: str, detail: str) -> int:
+def _input_error(root: Path, raw: bytes, error_type: str, detail: str, block: bool = True) -> int:
     """Record safe diagnostics without persisting Claude's potentially sensitive payload."""
     try:
         _event(
@@ -248,15 +253,17 @@ def _input_error(root: Path, raw: bytes, error_type: str, detail: str) -> int:
             input_sha256=hashlib.sha256(raw).hexdigest(),
             python=sys.executable,
             stdin_encoding=getattr(sys.stdin, "encoding", None),
+            action_blocked=block,
         )
     except OSError:
         pass
     print(
         f"AIDevFlow hook input rejected ({error_type}; {detail}; bytes={len(raw)}). "
-        "The tool call was blocked; inspect .aidevflow/events.jsonl for safe diagnostics.",
+        + ("The tool call was blocked; " if block else "Observation failed; Gate still requires execution evidence; ")
+        + "inspect .aidevflow/events.jsonl for safe diagnostics.",
         file=sys.stderr,
     )
-    return 2
+    return 2 if block else 0
 
 
 if __name__ == "__main__":

@@ -348,6 +348,9 @@ class Gate:
         result = dict(state)
         result["next_actions"] = self._next_actions(state, contract)
         result["agent_invocations"] = self._agent_invocations(run_dir)
+        observer_status = run_dir / "agent-observer-status.json"
+        if observer_status.is_file():
+            result["agent_observer"] = read_json(observer_status)
         if contract is not None:
             from .methods import method_status
             result["method_steps"] = method_status(self.root, run_dir, state, contract)
@@ -1172,13 +1175,15 @@ class Gate:
         if not state.get("agent_receipts_required"):
             return
         digest = sha256_bytes(json.dumps(result, sort_keys=True, ensure_ascii=False).encode("utf-8"))
-        from .receipts import completed_results
-        matching = completed_results(self._agent_invocations(run_dir), agent_type, digest, state.get("evidence_epoch", 0), bundle_sha256)
-        for entry in matching:
-            output = self._safe_repo_path(entry["result_path"])
-            if output.is_file() and sha256_bytes(json.dumps(read_json(output), sort_keys=True, ensure_ascii=False).encode("utf-8")) == digest:
-                return
-        raise GateError(f"Missing completed execution receipt for {agent_type}; inspect status.agent_invocations for missing_output/invalid_output, then dispatch the original role and submit its unchanged JSON result")
+        from .receipts import completed_results, execution_context
+        from .locking import observer_lock
+        with observer_lock(self.control):
+            matching = completed_results(self._agent_invocations(run_dir), agent_type, digest, state.get("evidence_epoch", 0), bundle_sha256, execution_context(state))
+            for entry in matching:
+                output = self._safe_repo_path(entry["result_path"])
+                if output.is_file() and sha256_bytes(json.dumps(read_json(output), sort_keys=True, ensure_ascii=False).encode("utf-8")) == digest:
+                    return
+        raise GateError(f"Missing completed execution receipt for {agent_type}; inspect status.agent_invocations and status.agent_observer for pending completion, missing/invalid output, identity conflict, unsupported mode or stale inputs. Wait for active execution; confirm failed/unsupported execution has ended before a fresh ordinary role dispatch. Submit its unchanged JSON result.")
 
     def _next_actions(self, state: dict[str, Any], contract: dict[str, Any] | None) -> list[str]:
         if state.get("status") == "needs_human":

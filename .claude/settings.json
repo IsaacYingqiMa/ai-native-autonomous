@@ -11,17 +11,21 @@
   "hooks": {
     "SubagentStart": [
       {
-        "matcher": "^aidevflow-(intent-analyst|contract-planner|independent-verifier)$",
+        "matcher": "*",
         "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-agent", "timeout": 15}]
       }
     ],
     "SubagentStop": [
       {
-        "matcher": "^aidevflow-(intent-analyst|contract-planner|independent-verifier)$",
+        "matcher": "*",
         "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-agent", "timeout": 15}]
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-agent", "timeout": 15}]
+      },
       {
         "matcher": "Skill",
         "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-method", "timeout": 15}]
@@ -31,7 +35,17 @@
         "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-agent", "timeout": 15}]
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Agent",
+        "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-agent", "timeout": 15}]
+      }
+    ],
     "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-agent", "timeout": 15}]
+      },
       {
         "matcher": "Bash",
         "hooks": [
