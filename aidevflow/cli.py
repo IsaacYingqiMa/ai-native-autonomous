@@ -33,6 +33,12 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--draft", required=True, help="generated contract JSON path relative to target repository")
 
     sub.add_parser("status", help="show active workflow state")
+    doctor = sub.add_parser("doctor", help="read-only Claude observer preflight; does not dispatch agents")
+    doctor.add_argument("--session-id", help="inspect native transcript capabilities without importing observations")
+    recover = sub.add_parser("recover-runtime", help="recover actual native role results lost to cancelled/missing Hooks")
+    recover.add_argument("--session-id", help="native Claude session ID; otherwise use known sessions")
+    continuation = sub.add_parser("continuation", help="select one owner of turn continuation; never accepts business work")
+    continuation.add_argument("--owner", required=True, choices=("native", "bounded_stop", "manual"))
     sub.add_parser("sync-projections", help="project Gate state into registered generated-document status cells")
     resume = sub.add_parser("resume-run", help="resume human handling only after an explicit user instruction")
     resume.add_argument("--by", required=True)
@@ -77,11 +83,25 @@ def build_parser() -> argparse.ArgumentParser:
     work_reopen.add_argument("--id", required=True)
     work_reopen.add_argument("--reason", required=True)
 
+    review = sub.add_parser("record-design-review", help="record an AI coordinator review of current design, work plan and executable tests")
+    review.add_argument("--reviewer", required=True)
+    review.add_argument("--reason", required=True)
+    review.add_argument("--evidence", required=True, nargs="+")
+
+    check = sub.add_parser("record-check", help="record a candidate-bound static/manual AI attestation with immutable evidence")
+    check.add_argument("--id", required=True)
+    check.add_argument("--result", choices=("passed", "failed", "blocked"), required=True)
+    check.add_argument("--candidate", required=True, help="candidate SHA captured before performing the check")
+    check.add_argument("--reviewer", required=True)
+    check.add_argument("--reason", required=True)
+    check.add_argument("--evidence", required=True, nargs="+")
+
     sub.add_parser("integrity", help="verify frozen test hashes")
 
     run = sub.add_parser("run-tests", help="execute a named argv test suite from the contract")
     run.add_argument("--suite", required=True)
     run.add_argument("--target", help="test file or ID substituted for {target} in the contract argv")
+    run.add_argument("--evidence", nargs="+", help="expected report/screenshot files under declared evidence_paths, captured after execution")
 
     sub.add_parser("prepare-verifier", help="build a read-only evidence bundle")
 
@@ -114,6 +134,20 @@ def main(argv: list[str] | None = None) -> int:
             result = gate.register_contract(args.draft)
         elif args.command == "status":
             result = gate.status()
+        elif args.command == "doctor":
+            from .diagnostics import doctor
+            result = doctor(Path(args.root))
+            if args.session_id:
+                from .runtime import inspect_session
+                report = inspect_session(Path(args.root), args.session_id)
+                result["native_session"] = {k: v for k, v in report.items() if k != "events"}
+                result["native_session"]["recoverable_events"] = len(report["events"])
+        elif args.command == "recover-runtime":
+            from .runtime import recover
+            result = recover(Path(args.root), args.session_id)
+        elif args.command == "continuation":
+            from .continuation import set_owner
+            result = set_owner(Path(args.root), args.owner)
         elif args.command == "sync-projections":
             result = gate.sync_projections()
         elif args.command == "resume-run":
@@ -142,8 +176,12 @@ def main(argv: list[str] | None = None) -> int:
             result = gate.reopen_work_item(args.id, args.reason)
         elif args.command == "integrity":
             result = {"ok": not gate.integrity(), "mismatches": []}
+        elif args.command == "record-design-review":
+            result = gate.record_design_review(args.reviewer, args.reason, args.evidence)
+        elif args.command == "record-check":
+            result = gate.record_check(args.id, args.result, args.candidate, args.reviewer, args.reason, args.evidence)
         elif args.command == "run-tests":
-            result = gate.run_tests(args.suite, args.target)
+            result = gate.run_tests(args.suite, args.target, args.evidence)
         elif args.command == "prepare-verifier":
             result = gate.prepare_verifier()
         elif args.command == "record-verdict":
@@ -160,12 +198,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             parser.error("unknown command")
         _json(result)
+        if args.command == "doctor" and not result["ok"]:
+            return 1
         if args.command == "run-tests" and not (result["valid_red"] if args.suite == "red" else result["passed"]):
             return 1
+        if args.command == "record-check" and result["result"] != "passed":
+            return 1
         return 0
-    except GateError as exc:
+    except (GateError, OSError, ValueError) as exc:
         try:
-            if gate.active_path.is_file():
+            if args.command not in ("doctor", "status") and gate.active_path.is_file():
                 from .gate import read_json
                 task_id = read_json(gate.active_path).get("task_id")
                 if isinstance(task_id, str):

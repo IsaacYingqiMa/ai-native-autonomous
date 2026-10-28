@@ -5,6 +5,7 @@
 .aidevflow/manifest.json
 .aidevflow/events.jsonl
 .aidevflow/archive/
+.aidevflow/agent-observer.lock
 __pycache__/
 *.py[cod]
 .venv/
@@ -14,4 +15,5 @@ docs/
 examples/
 test/
 .claude/skills/zsspec-*
+.claude/skills/.skillhub/
 bash.exe.stackdump
