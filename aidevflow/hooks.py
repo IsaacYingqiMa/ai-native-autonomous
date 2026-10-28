@@ -85,13 +85,17 @@ def guard(payload: dict[str, Any], root: Path) -> int:
             if rel.startswith("specs/aidevflow-intake/") and state.get("current_stage") == "intent":
                 continue
             return _block("Product and project files are read-only while Intent is being resolved; only generated drafts under specs/aidevflow-intake/ may be written.", root, rel, "intake-read-only", payload)
+        from .managed import enabled, artifact_path
+        if enabled(contract) and artifact_path(contract, rel):
+            if state.get("current_stage") in ("design", "build", "verify"):
+                continue  # Reports/screenshots only; cannot overlap product/spec/test paths.
         matches_code = any(_matches(rel, pattern) for pattern in contract.get("code_paths", []))
-        is_design_or_test = rel in set(contract.get("design_artifacts", [])) | set(contract.get("test_files", []))
+        is_design_or_test = rel in set(contract.get("design_artifacts", [])) | set(contract.get("test_files", [])) | set(contract.get("test_support_files", []))
         if not matches_code and not is_design_or_test:
             return _block(f"AIDevFlow blocked an out-of-scope change to {rel}; the pinned Contract does not declare this path.", root, rel, "out-of-scope-path", payload)
         if is_design_or_test:
             if state.get("current_stage") != "design":
-                return _block(f"Specification content can only change during Design. For TASK/CHK status use start-work-item, complete-work-item, run-tests or sync-projections; Gate's registered adapter writes mapped status cells. Current stage: {state.get('current_stage')}.", root, rel, "design-artifact-offstage", payload)
+                return _block(f"Specification content can only change during Design. For TASK/CHK status use work-item commands, run-tests, record-check or sync-projections; Gate writes mapped status cells. Current stage: {state.get('current_stage')}.", root, rel, "design-artifact-offstage", payload)
             continue
         if matches_code:
             if state.get("current_stage") not in ("build",):
@@ -146,7 +150,10 @@ def _matches(path: str, pattern: str) -> bool:
     return fnmatch.fnmatchcase(path, normalized)
 
 
-def resume(root: Path) -> int:
+def resume(root: Path, payload: dict[str, Any] | None = None) -> int:
+    if payload:
+        from .runtime import remember_session
+        remember_session(root, payload)
     active = root / ".aidevflow" / "active-run.json"
     if not active.is_file():
         return 0
@@ -172,6 +179,14 @@ def stop_check(root: Path, payload: dict[str, Any] | None = None) -> int:
         return 0  # A turn ending is not a business transition; Gate still rejects invalid state.
     if state.get("current_stage") == "verify" and state.get("status") not in ("accepted", "needs_human"):
         print("AIDevFlow verification is incomplete; this turn ending does not accept the task. Resume from Gate status. Only a recorded failure or unresolved decision may escalate the task.", file=sys.stderr)
+    from .continuation import decide
+    try:
+        result = decide(root, payload or {})
+    except (GateError, OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"AIDevFlow continuation unavailable: {exc}; Gate state is unchanged.", file=sys.stderr)
+        return 0
+    if result:
+        print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
@@ -182,9 +197,7 @@ def main() -> int:
     action = sys.argv[1] if len(sys.argv) > 1 else "guard"
     observational = action in ("trace-agent", "trace-method", "stop")
     root = Path(os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd()).resolve()
-    if action == "resume":
-        return resume(root)
-    if action not in ("guard", "guard-bash", "stop", "trace-agent", "trace-method"):
+    if action not in ("guard", "guard-bash", "stop", "trace-agent", "trace-method", "resume"):
         print(f"Unknown hook action: {action}", file=sys.stderr)
         return 2
     try:
@@ -201,6 +214,8 @@ def main() -> int:
         return _input_error(root, raw, "json_decode_error", f"line={exc.lineno} column={exc.colno} position={exc.pos}", block=not observational)
     if not isinstance(payload, dict):
         return _input_error(root, raw, "invalid_payload_shape", "top_level_must_be_object", block=not observational)
+    if action == "resume":
+        return resume(root, payload)
     if action == "stop":
         return stop_check(root, payload)
     if action == "trace-method":
@@ -208,6 +223,10 @@ def main() -> int:
         try:
             observe_skill(root, payload)
         except (GateError, OSError, ValueError, KeyError, TypeError) as exc:
+            try:
+                _event(root, "method_observer_error", error_type=type(exc).__name__, detail=str(exc))
+            except OSError:
+                pass
             print(f"AIDevFlow method observation could not be captured: {exc}", file=sys.stderr)
         return 0  # Observation never blocks the tool; new-run gates check it.
     if action == "trace-agent":

@@ -1,6 +1,10 @@
 # Claude observer B：变更说明与完整使用教程
 
+**当前行为以 [Observer B2 修复与重跑指南](RUNTIME-COMPATIBILITY.md) 为准。** 下文 b1 的测试与演练记录保留为历史；“只依赖 Hook”“Stop 始终仅观察”等描述不适用于 B2 新建自主任务。旧运行规则不自动迁移。
+
 日期：2026-10-26。观察器版本：`claude-observer-b1`。业务可靠性协议保持 v3。
+
+2026-10-27：zsspec 完整技能包 v1.4 的方法接入请同时阅读 [串行托管说明](ZSSPEC-MANAGED.md)。本文原有 70 项回归与真实角色演练属于 observer B 的历史验证记录，不代表新托管方法已经完成真实业务演练。
 
 本次更新只加固 Claude Code 的派遣观测、结果关联、诊断与安装迁移。
 Intent → Contract → Design → Build → Verify → delivery_ready、zsspec 方法资产、测试冻结、独立验收和业务修复预算不变。
@@ -107,22 +111,9 @@ git -c core.fsmonitor=false status --short
 历史 runs、原始需求、Contract、测试证据、事件和 zsspec 固定资产不会被安装器重写。
 安装会改变候选运行时身份；已有检查可能 stale，需要重新取证，不能重算旧结果摘要掩盖变化。
 
-本项目已有 12 个 zsspec Skills，通常无需再次复制。首次安装到其他项目时，安装器仍不自动安装 zsspec。
-只复制缺少的完整目录，已有方法目录应先核对，不覆盖用户定制：
+安装器不自动安装或升级 zsspec。不要按 Skill 数量判断版本兼容，也不要仅复制缺少目录而混合新旧公共 Skill。
 
-```powershell
-$adfMethods = "D:\InspurCode\ai-native-autonomous\.claude\skills"
-Get-ChildItem -LiteralPath $adfMethods -Directory |
-  Where-Object { $_.Name -like 'zsspec-*' } |
-  ForEach-Object {
-      $adfDestination = Join-Path '.claude\skills' $_.Name
-      if (Test-Path -LiteralPath $adfDestination) {
-          Write-Host "保留已有方法：$($_.Name)"
-      } else {
-          Copy-Item -LiteralPath $_.FullName -Destination '.claude\skills' -Recurse
-      }
-  }
-```
+新任务采用 zsspec 技能包 v1.4 前，单独核对并部署完整方法包（含 `.skillhub`、test/reference 和 standard 模板；排除维护侧 `zsspec-doctor`），保留和比较用户定制。旧活动 Contract 若引用旧入口，应先按旧方法合法结束，或在隔离项目演练新版；不要直接删掉旧方法再强行继续。完整边界见上面的串行托管说明。
 
 按项目规则审查安装 diff 和版本管理范围，不把用户已有暂存修改混入安装提交。
 重新启动 Claude Code，使 Hook、Agent 定义和 flow 说明全部生效：

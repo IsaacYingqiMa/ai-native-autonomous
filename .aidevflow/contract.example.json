@@ -4,16 +4,18 @@
   "title": "Sample feature task",
   "method": {
     "name": "zsspec",
+    "profile": "zsspec-managed-v1",
     "stages": {
-      "design": ["zsspec-spec", "zsspec-test-gen", "zsspec-verify"],
+      "design": ["zsspec-req", "zsspec-des", "zsspec-task", "zsspec-chk", "zsspec-verify", "zsspec-test"],
       "build": ["zsspec-apply"],
-      "review": ["zsspec-code-review", "zsspec-done"]
+      "review": ["zsspec-test", "zsspec-done"]
     }
   },
   "max_repair_attempts": 3,
   "work_plan_required": true,
   "test_timeout_seconds": 300,
   "code_paths": ["src/**", "app/**", "backend/**", "frontend/src/**"],
+  "evidence_paths": ["specs/checklist/reports", "test-results", "playwright-report"],
   "design_artifacts": [
     "specs/requirement/feature/REQ-feature.md",
     "specs/design/feature/DES-feature-后端.md",
@@ -21,6 +23,7 @@
     "specs/checklist/feature/CHK-feature.md"
   ],
   "test_files": ["tests/test_feature.py"],
+  "test_support_files": [],
   "red_test_files": ["tests/test_feature.py"],
   "test_commands": {
     "red": ["python", "-m", "pytest", "{target}", "-q"],
@@ -28,11 +31,12 @@
     "regression": ["python", "-m", "pytest", "tests", "-q"]
   },
   "acceptance_items": [
-    {"id": "REQ-001", "criterion": "Replace this with an observable acceptance criterion."}
+    {"id": "REQ-feature-目标", "criterion": "Replace this with an observable acceptance criterion."}
   ],
   "required_checks": [
-    {"id": "CHECK-feature", "suite": "green", "target": "tests/test_feature.py", "acceptance_items": ["REQ-001"]},
-    {"id": "CHECK-regression", "suite": "regression", "acceptance_items": ["REQ-001"]}
+    {"id": "CHECK-static", "kind": "static", "acceptance_items": ["REQ-feature-目标"]},
+    {"id": "CHECK-feature", "suite": "green", "target": "tests/test_feature.py", "acceptance_items": ["REQ-feature-目标"]},
+    {"id": "CHECK-regression", "suite": "regression", "acceptance_items": ["REQ-feature-目标"]}
   ],
   "routing": {
     "acceptance_test_failure": {"to": "build"},

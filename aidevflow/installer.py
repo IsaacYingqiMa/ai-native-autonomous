@@ -87,6 +87,7 @@ def install(source_root: Path, target_root: Path) -> dict[str, Any]:
         ".aidevflow/events.jsonl\n"
         ".aidevflow/archive/\n"
         ".aidevflow/agent-observer.lock\n"
+        ".aidevflow/runtime-sessions/\n"
         "# Keep the AIDevFlow Claude Code entrypoint and agents versioned even when .claude is ignored\n"
         "!.claude/\n"
         "!.claude/settings.json\n"

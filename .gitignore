@@ -15,4 +15,5 @@ docs/
 examples/
 test/
 .claude/skills/zsspec-*
+.claude/skills/.skillhub/
 bash.exe.stackdump

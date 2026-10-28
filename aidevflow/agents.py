@@ -1,7 +1,8 @@
 """Claude observations -> durable role receipts; no business approvals here.
 
 This establishes local workflow provenance, not hostile-user authentication.
-No transcript scraping or synthetic Start events are used for recovery.
+Native hook and bounded structured-transcript transports share the same identity
+checks. Recovery never invents Start/Stop events or reads prose for agent IDs.
 """
 from __future__ import annotations
 
@@ -134,7 +135,7 @@ def _reconcile(root: Path, run_dir: Path, events: list[dict[str, Any]]) -> dict[
             diagnostics.append(entry)
 
     for event in events:
-        if event["kind"] != "dispatch" or event["event"] != "PreToolUse":
+        if event["kind"] != "dispatch" or event["event"] not in ("PreToolUse", "Transcript:Agent.request"):
             continue
         key = (event["session_id"], event["tool_use_id"])
         if key in calls:
@@ -149,7 +150,7 @@ def _reconcile(root: Path, run_dir: Path, events: list[dict[str, Any]]) -> dict[
     # Provider IDs are associated by the parent tool response, never by role
     # name or "the latest running analyst".
     for event in events:
-        if event["kind"] != "dispatch" or event["event"] == "PreToolUse":
+        if event["kind"] != "dispatch" or event["event"] in ("PreToolUse", "Transcript:Agent.request"):
             continue
         receipt = calls.get((event["session_id"], event["tool_use_id"]))
         if receipt is None:
@@ -208,7 +209,7 @@ def _reconcile(root: Path, run_dir: Path, events: list[dict[str, Any]]) -> dict[
         if event["kind"] == "start":
             receipt["start_observed"] = True
         status = event.get("provider_status")
-        if event["kind"] == "stop" or status == "completed":
+        if event["kind"] == "stop" or status == "completed" or event.get("terminal_return") is True:
             receipt["execution_finished"] = True
             receipt["finished_at"] = event["observed_at"]
         if status in ("failed", "cancelled", "canceled"):
@@ -237,6 +238,8 @@ def _reconcile(root: Path, run_dir: Path, events: list[dict[str, Any]]) -> dict[
                     write_json_atomic(output, event["result"])
                 receipt.update(result_path=output.relative_to(root).as_posix(), result_sha256=digest,
                                output_source="SubagentHandback" if priority == 3 else "Agent.completed" if priority == 2 else "SubagentStop")
+                if event.get("transport"):
+                    receipt["result_transport"] = event["transport"]
             else:
                 receipt["output_error"] = "invalid_json_object"
                 if "output_error_location" in preferred[-1]:
@@ -269,8 +272,18 @@ def _reconcile(root: Path, run_dir: Path, events: list[dict[str, Any]]) -> dict[
 
 
 def capture_event(root: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
+    from .runtime import remember_session
+    remember_session(root, payload)
+    return _capture(root, _normalize(payload))
+
+
+def capture_transcript_event(root: Path, event: dict[str, Any]) -> None:
+    """Internal adapter: only runtime.py constructs events from native records."""
+    _capture(root, event, from_transcript=True)
+
+
+def _capture(root: Path, event: dict[str, Any] | None, *, from_transcript: bool = False) -> dict[str, Any] | None:
     from .gate import Gate, read_json, write_json_atomic
-    event = _normalize(payload)
     if event is None or not (root / ".aidevflow" / "active-run.json").is_file():
         return None
     session = event.get("session_id")
@@ -284,11 +297,7 @@ def capture_event(root: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
         state, run_dir, _ = gate._load_active()
         if state.get("status") in ("needs_human", "archived", "delivery_ready"):
             return None
-        if event["kind"] == "dispatch" and event["event"] == "PreToolUse":
-            identity_path = run_dir / "runtime-observations" / f"{_digest(session)}.json"
-            if not identity_path.is_file():
-                from .diagnostics import runtime_identity
-                write_json_atomic(identity_path, runtime_identity())
+        # No subprocess/version probe on the Hook critical path. doctor owns it.
         directory = run_dir / "agent-observations"
         events = [read_json(p) for p in directory.glob("*.json")]
         if event.get("unrecognized_type"):
@@ -297,7 +306,10 @@ def capture_event(root: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
                                 and e.get("display_name") and e["display_name"] == event.get("agent_type") for e in events)
             if event["agent_id"] not in known_ids and not named_request:
                 return None  # Never archive unrelated agent messages.
-        event.update(schema="aidevflow/agent-observation-v1", task_id=state["task_id"], context=execution_context(state))
+        context = event.get("context") if from_transcript else execution_context(state)
+        if from_transcript and context != execution_context(state):
+            return None  # Never relabel old dispatches with current inputs.
+        event.update(schema="aidevflow/agent-observation-v1", task_id=state["task_id"], context=context)
         identity = _digest(event)
         path = directory / f"{identity}.json"
         if not path.is_file():

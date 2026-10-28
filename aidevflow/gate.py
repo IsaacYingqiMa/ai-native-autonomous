@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -59,6 +60,18 @@ def read_json(path: Path) -> Any:
         raise GateError(f"Cannot read valid JSON from {path}: {exc}") from exc
 
 
+def replace_file_atomic(source: str | Path, destination: Path) -> None:
+    """Tolerate short Windows sharing/access races without hiding permanent errors."""
+    for attempt in range(5):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 4:
+                raise
+            time.sleep(0.025 * (2 ** attempt))
+
+
 def write_json_atomic(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
@@ -68,7 +81,7 @@ def write_json_atomic(path: Path, value: Any) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp_name, path)
+        replace_file_atomic(temp_name, path)
     except Exception:
         try:
             os.unlink(temp_name)
@@ -135,6 +148,15 @@ class Gate:
         contract = read_json(contract_path)
         if state.get("contract_sha256") != sha256_file(contract_path):
             raise GateError("AIDevFlow contract changed during this run; stop and escalate for human review")
+        from .managed import enabled
+        if enabled(contract):
+            reference = state.get("method_policy")
+            if not isinstance(reference, dict):
+                raise GateError("Managed run has no pinned method policy")
+            policy_path = self._safe_repo_path(reference["path"])
+            policy_path.relative_to(run_dir)
+            if not policy_path.is_file() or sha256_file(policy_path) != reference.get("sha256"):
+                raise GateError("Pinned method policy changed; stop and escalate for human review")
         work_plan = state.get("work_plan")
         if work_plan:
             if not isinstance(work_plan, dict) or not isinstance(work_plan.get("path"), str):
@@ -216,7 +238,10 @@ class Gate:
             "autonomy_policy": "clarify_then_auto",
             "reliability_version": 3,
             "agent_receipts_required": True,
-            "method_observations_required": True,
+            "method_observations_required": False,
+            "execution_policy": {"schema": "aidevflow/execution-policy-v1",
+                                 "method_evidence": "artifact_gated",
+                                 "continuation_owner": "bounded_stop"},
             "request_path": request_abs.relative_to(self.root).as_posix(),
             "request_sha256": sha256_bytes(request_bytes),
             "request_snapshot_path": source_copy.relative_to(self.root).as_posix(),
@@ -270,6 +295,7 @@ class Gate:
         if contract.get("task_id") != state["task_id"]:
             raise GateError("Generated contract.task_id must match the task id assigned at intake")
         self._require_agent_receipt(state, run_dir, "contract_planner", contract)
+        self._pin_method_policy(state, run_dir, contract)
         target = run_dir / "contract.json"
         write_json_atomic(target, contract)
         state["contract_path"] = target.relative_to(self.root).as_posix()
@@ -285,6 +311,22 @@ class Gate:
             stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
+
+    def _pin_method_policy(self, state: dict[str, Any], run_dir: Path, contract: dict[str, Any]) -> None:
+        from .managed import enabled, package_manifest, read_policy
+        if enabled(contract):
+            policy = read_policy(self.root)
+            policy["package"] = package_manifest(self.root, contract)
+            if policy["effective"]["manual"] == "disabled" and any(check.get("kind") == "manual" for check in contract.get("required_checks", [])):
+                raise GateError("Contract requires manual evidence but zsspec.yml disables it")
+            if policy["effective"]["e2e"] == "disabled" and any(check.get("mode") == "auto" for check in contract.get("required_checks", [])):
+                raise GateError("Contract requires auto evidence but zsspec.yml disables e2e")
+            path = run_dir / "method-policy.json"
+            write_json_atomic(path, policy)
+            state["method_policy"] = {"path": path.relative_to(self.root).as_posix(), "sha256": sha256_file(path)}
+            # Existing runs retain their original strict observation policy.
+            # New autonomous runs gate artifacts/tests, not a provider's Skill hook.
+            state["method_observations_required"] = state.get("execution_policy", {}).get("method_evidence") != "artifact_gated"
 
     def _save(self, state: dict[str, Any], run_dir: Path, event: str, **fields: Any) -> None:
         state["updated_at"] = utc_now()
@@ -338,6 +380,7 @@ class Gate:
             "updated_at": utc_now(),
         }
         run_dir.mkdir(parents=True)
+        self._pin_method_policy(state, run_dir, contract)
         self._event(task_id, "run_started", stage="intent", contract_path=contract_rel, state_snapshot=state)
         write_json_atomic(run_dir / "run-state.json", state)
         write_json_atomic(self.active_path, {"task_id": task_id, "state_path": (run_dir / "run-state.json").relative_to(self.root).as_posix()})
@@ -348,22 +391,35 @@ class Gate:
         result = dict(state)
         result["next_actions"] = self._next_actions(state, contract)
         result["agent_invocations"] = self._agent_invocations(run_dir)
+        continuation = run_dir / "continuation.json"
+        if continuation.is_file():
+            result["continuation"] = read_json(continuation)
         observer_status = run_dir / "agent-observer-status.json"
         if observer_status.is_file():
             result["agent_observer"] = read_json(observer_status)
         if contract is not None:
             from .methods import method_status
             result["method_steps"] = method_status(self.root, run_dir, state, contract)
+            result["method_warnings"] = ["Method invocation is not observed: " + item["skill"]
+                                         for item in result["method_steps"] if item["status"] != "observed"]
+            if state.get("method_policy"):
+                result["method_policy_details"] = read_json(self._safe_repo_path(state["method_policy"]["path"]))
             result["candidate_sha256"] = self._candidate(state, contract)["sha256"]
             result["checks"] = self._check_statuses(state, contract)
             pending = {}
+            attestations = []
             for check in result["checks"]:
                 if check["status"] != "passed":
+                    if check.get("kind", "command") != "command":
+                        attestations.append({"id": check["id"], "kind": check["kind"], "status": check["status"],
+                                             "action": "Inspect current candidate, then record-check with fresh report/screenshot evidence"})
+                        continue
                     argv = ["python", "scripts/aidevflow.py", "run-tests", "--suite", check["suite"]]
                     if check.get("target"):
                         argv.extend(["--target", check["target"]])
                     pending[(check["suite"], check.get("target"))] = {"suite": check["suite"], "target": check.get("target"), "argv": argv}
             result["pending_checks"] = list(pending.values())
+            result["pending_attestations"] = attestations
             if state["current_stage"] == "verify" and state["status"] == "active" and pending:
                 result["next_actions"] = ["Run status.pending_checks once per suite/target in the current environment; Verify permits check reruns without reopening completed work items", "prepare-verifier; dispatch independent Verifier; record-verdict; advance --to delivery_ready"]
             result["verdict_current"] = bool(state.get("verdict_ref") and state.get("verifier_bundle") and state["verifier_bundle"].get("candidate_sha256") == result["candidate_sha256"] and all(item["status"] == "passed" for item in result["checks"]))
@@ -565,10 +621,12 @@ class Gate:
     def freeze_tests(self, paths: list[str]) -> dict[str, str]:
         state, run_dir, contract = self._load_active()
         self._require_stage(state, "design")
-        required = contract.get("test_files", [])
+        from .checks import require_design_review
+        require_design_review(self, state, run_dir, contract)
+        required = contract.get("test_files", []) + contract.get("test_support_files", [])
         requested = paths or required
         if required and set(requested) != set(required):
-            raise GateError("Freeze exactly the test_files declared in the contract")
+            raise GateError("Freeze exactly the test_files and test_support_files declared in the contract")
         if not requested:
             raise GateError("No test files declared; set contract.test_files before freezing")
         if state.get("frozen_tests"):
@@ -600,7 +658,8 @@ class Gate:
         if errors:
             raise GateError("Invalid work plan: " + "; ".join(errors))
         errors = validate_projections(draft, contract, self.root)
-        if state.get("reliability_version", 1) >= 2 and contract.get("method", {}).get("name") == "zsspec":
+        from .managed import enabled
+        if (state.get("reliability_version", 1) >= 2 or enabled(contract)) and contract.get("method", {}).get("name") == "zsspec":
             expected = {
                 "work_item": {item["id"] for item in draft["items"]} if any(Path(path).name.startswith("TASK-") for path in contract["design_artifacts"]) else set(),
                 "check": {item["id"] for item in contract.get("required_checks", [])} if any(Path(path).name.startswith("CHK-") for path in contract["design_artifacts"]) else set(),
@@ -632,7 +691,7 @@ class Gate:
         return {"path": state["work_plan"]["path"], "sha256": digest, "work_items": state["work_items"]}
 
     def start_work_item(self, work_item_id: str) -> dict[str, Any]:
-        state, run_dir, _ = self._load_active()
+        state, run_dir, contract = self._load_active()
         self._require_stage(state, "build")
         self._check_work_plan_integrity(state, run_dir)
         item = self._work_item(state, work_item_id)
@@ -640,6 +699,9 @@ class Gate:
             raise GateError(f"Work item {work_item_id} is completed; reopen it before starting again")
         if item["status"] == "in_progress":
             return item
+        from .managed import enabled
+        if enabled(contract) and any(entry["id"] != work_item_id and entry["status"] == "in_progress" for entry in state["work_items"]):
+            raise GateError("Managed v1 is serial; finish the active work item before starting another")
         incomplete = [dependency for dependency in item["depends_on"] if self._work_item(state, dependency)["status"] != "completed"]
         if incomplete:
             raise GateError(f"Work item {work_item_id} has incomplete dependencies: {', '.join(incomplete)}")
@@ -765,6 +827,13 @@ class Gate:
     def integrity(self) -> list[str]:
         state, run_dir, contract = self._load_active()
         mismatches = []
+        from .managed import enabled, file_hash, package_manifest
+        if enabled(contract):
+            policy = read_json(self._safe_repo_path(state["method_policy"]["path"]))
+            if file_hash(self.root / policy["config_path"]) != policy["config_sha256"]:
+                mismatches.append(policy["config_path"])
+            if package_manifest(self.root, contract) != policy["package"]:
+                mismatches.append(".claude/skills (pinned method package)")
         for rel, expected in state.get("frozen_tests", {}).items():
             path = self._safe_repo_path(rel)
             if not path.is_file() or sha256_file(path) != expected:
@@ -783,9 +852,13 @@ class Gate:
             raise GateError("Frozen test or specification integrity mismatch: " + ", ".join(mismatches))
         return mismatches
 
-    def run_tests(self, suite: str, target: str | None = None) -> dict[str, Any]:
+    def run_tests(self, suite: str, target: str | None = None, evidence_paths: list[str] | None = None) -> dict[str, Any]:
         state, run_dir, contract = self._load_active()
         self._require_executable(state)
+        if evidence_paths:
+            from .managed import enabled
+            if not enabled(contract):
+                raise GateError("Command artifact capture requires zsspec-managed-v1")
         if target is not None:
             declared_targets = contract.get("test_files", []) + [check["target"] for check in contract.get("required_checks", []) if check.get("target")]
             target = next((path for path in declared_targets if path.replace("\\", "/") == target.replace("\\", "/")), target)
@@ -801,10 +874,18 @@ class Gate:
             raise GateError(f"{suite} target must match one of contract.test_files")
         if suite == "red" and state["current_stage"] != "design":
             raise GateError("Red evidence must be collected during Design, before implementation")
+        if suite == "red":
+            from .managed import enabled
+            if enabled(contract) and not state.get("frozen_tests"):
+                raise GateError("Managed Red evidence requires reviewed and frozen tests first")
         if suite in ("green", "regression") and state["current_stage"] == "design":
             raise GateError(f"{suite} suite cannot run until Build")
         command = [arg.replace("{target}", target or "") for arg in command]
         candidate = self._candidate(state, contract)
+        prior_artifacts = {}
+        for rel in evidence_paths or []:
+            path = self._safe_repo_path(rel)
+            prior_artifacts[rel] = (sha256_file(path), path.stat().st_mtime_ns) if path.is_file() else None
         started = utc_now()
         try:
             env = os.environ.copy()
@@ -831,9 +912,21 @@ class Gate:
         }
         record["passed"] = result.returncode == 0 and not record["candidate_changed"]
         record["valid_red"] = suite != "red" or (not record["candidate_changed"] and valid_red_result(result.returncode, result.stdout + result.stderr))
+        if evidence_paths:
+            from .checks import snapshot_files
+            try:
+                for rel in evidence_paths:
+                    path = self._safe_repo_path(rel)
+                    if path.is_file() and prior_artifacts[rel] == (sha256_file(path), path.stat().st_mtime_ns):
+                        raise GateError(f"Evidence was not refreshed by this command: {rel}")
+                record["artifacts"] = snapshot_files(self, state, contract, evidence_paths, "test-artifacts")
+            except GateError as exc:
+                record["artifact_error"] = str(exc)
+                record["passed"] = False
+                record["valid_red"] = False
         write_json_atomic(evidence, record)
         record["evidence_sha256"] = sha256_file(evidence)
-        state["test_runs"].append({key: record[key] for key in ("suite", "target", "exit_code", "passed", "valid_red", "evidence_path", "evidence_sha256", "finished_at", "candidate_sha256", "evidence_epoch", "candidate_changed")})
+        state["test_runs"].append({key: record[key] for key in ("suite", "target", "exit_code", "passed", "valid_red", "evidence_path", "evidence_sha256", "finished_at", "candidate_sha256", "evidence_epoch", "candidate_changed", "artifacts", "artifact_error") if key in record})
         state["verifier_bundle"] = None
         state.pop("verdict_ref", None)
         if state.get("status") in ("accepted", "retrying"):
@@ -870,13 +963,30 @@ class Gate:
         bundle_dir = writer.directory
         files: list[Path] = []
         files.append(self._safe_repo_path(state["contract_path"]))
+        from .checks import intact
+        for reference in (state.get("method_policy"), state.get("design_review")):
+            if reference:
+                path = self._safe_repo_path(reference["path"])
+                if not path.is_file() or sha256_file(path) != reference["sha256"]:
+                    raise GateError("Managed policy/review evidence changed")
+                files.append(path)
+                for entry in read_json(path).get("evidence", []):
+                    if not intact(self, [entry], run_dir):
+                        raise GateError("Design review evidence changed")
+                    files.append(self._safe_repo_path(entry["path"]))
+        for record in state.get("check_results", []):
+            path = self._safe_repo_path(record["path"])
+            if not path.is_file() or sha256_file(path) != record["sha256"] or not intact(self, record["evidence"], run_dir):
+                raise GateError("Recorded non-command check evidence changed")
+            files.append(path)
+            files.extend(self._safe_repo_path(entry["path"]) for entry in record["evidence"])
         files.extend(self._safe_repo_path(rel) for rel in candidate["files"] if any(_glob_match(rel, pattern) for pattern in contract.get("code_paths", [])) and self._safe_repo_path(rel).is_file())
         if state.get("request_snapshot_path"):
             source = self._safe_repo_path(state["request_snapshot_path"])
             if sha256_file(source) != state.get("request_sha256"):
                 raise GateError("Original request snapshot changed")
             files.append(source)
-        files.extend(self._safe_repo_path(rel) for rel in contract.get("test_files", []))
+        files.extend(self._safe_repo_path(rel) for rel in contract.get("test_files", []) + contract.get("test_support_files", []))
         if state.get("work_plan"):
             files.append(self._safe_repo_path(state["work_plan"]["path"]))
             for item in state.get("work_items", []):
@@ -900,6 +1010,9 @@ class Gate:
             if not evidence.is_file() or sha256_file(evidence) != item.get("evidence_sha256"):
                 raise GateError(f"Recorded test evidence changed: {item['evidence_path']}")
             files.append(evidence)
+            if not intact(self, item.get("artifacts", []), run_dir):
+                raise GateError("Recorded command artifacts changed")
+            files.extend(self._safe_repo_path(entry["path"]) for entry in item.get("artifacts", []))
         code_paths = contract.get("code_paths", []) or ["."]
         diff_result = self._git("diff", "--binary", state["base_commit"], "--", ".", ":(exclude).aidevflow/**", ":(exclude).claude/**", ":(exclude)specs/aidevflow-intake/**", check=False)
         if diff_result.returncode:
@@ -1091,17 +1204,20 @@ class Gate:
         tracked = self._git("ls-files", "-z").stdout.split("\0")
         others = self._git("ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0")
         ignored_product = self._git("ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", *contract.get("code_paths", [])).stdout.split("\0")
-        explicit = set(contract.get("test_files", [])) | set(contract.get("design_artifacts", []))
+        explicit = set(contract.get("test_files", [])) | set(contract.get("test_support_files", [])) | set(contract.get("design_artifacts", []))
         # Tracked dependencies (including test runners and framework files) matter.
         # New files are scoped so a newly saved, untracked verdict/draft is not a
         # product change. All coordinator drafts belong under the intake directory.
         names = set(tracked) | explicit | {rel for rel in others + ignored_product if rel in explicit or any(_glob_match(rel, pattern) for pattern in contract.get("code_paths", []))}
         plan = self._plan(state)
         files: dict[str, str | None] = {}
+        from .managed import enabled, artifact_path, file_hash, package_manifest
         for rel in sorted(names - {""}):
             parts = PurePosixPath(rel).parts
             if parts[0] == ".aidevflow" or rel.startswith("specs/aidevflow-intake/") or any(part in ("__pycache__", ".pytest_cache", ".test-tmp") for part in parts) or rel.endswith((".pyc", ".pyo")):
                 continue
+            if enabled(contract) and artifact_path(contract, rel):
+                continue  # Runtime reports are separately snapshotted, never product inputs.
             path = self._safe_repo_path(rel)
             if path.is_dir():
                 raise GateError(f"Nested Git repositories/submodules require an explicit snapshot adapter: {rel}")
@@ -1111,6 +1227,9 @@ class Gate:
                 raise GateError(f"Cannot snapshot candidate file {rel}: {exc}") from exc
         runtime = self.control / "runtime-manifest.json"
         value = {"files": files, "contract_sha256": state.get("contract_sha256"), "evidence_epoch": state.get("evidence_epoch", 0), "runtime_sha256": sha256_file(runtime) if runtime.is_file() else None}
+        if enabled(contract):
+            value["method_package_sha256"] = package_manifest(self.root, contract)["sha256"]
+            value["method_config_sha256"] = file_hash(self.root / "specs/zsspec.yml")
         return {**value, "sha256": sha256_bytes(json.dumps(value, sort_keys=True).encode("utf-8"))}
 
     @staticmethod
@@ -1126,9 +1245,19 @@ class Gate:
         latest = {(item["suite"], item.get("target")): item for item in state.get("test_runs", []) if item["suite"] != "red"}
         results = []
         for check in self._required_checks(contract):
+            if check.get("kind", "command") != "command":
+                from .checks import attestation_status
+                results.append(attestation_status(self, state, check, candidate))
+                continue
             item = latest.get((check["suite"], check.get("target")))
             fresh = bool(item and item.get("candidate_sha256") == candidate and not item.get("candidate_changed"))
-            results.append({"id": check["id"], "suite": check["suite"], "target": check.get("target"), "status": "missing" if item is None else "stale" if not fresh else "passed" if item["passed"] else "failed", "evidence_path": item.get("evidence_path") if item else None})
+            status = "missing" if item is None else "stale" if not fresh else "passed" if item["passed"] else "failed"
+            if item:
+                from .checks import intact
+                evidence = self._safe_repo_path(item["evidence_path"])
+                if not evidence.is_file() or sha256_file(evidence) != item.get("evidence_sha256") or not intact(self, item.get("artifacts", []), self.runs / state["task_id"]):
+                    status = "invalid"
+            results.append({"id": check["id"], "kind": "command", "suite": check["suite"], "target": check.get("target"), "status": status, "evidence_path": item.get("evidence_path") if item else None})
         return results
 
     def _check_candidate_bundle(self, state: dict[str, Any], contract: dict[str, Any]) -> None:
@@ -1141,7 +1270,7 @@ class Gate:
         if not plan or not plan.get("projections"):
             return
         contract = read_json(self._safe_repo_path(state["contract_path"]))
-        statuses = {item["id"]: {"passed": "通过", "failed": "失败", "stale": "待执行", "missing": "待执行"}[item["status"]] for item in self._check_statuses(state, contract)}
+        statuses = {item["id"]: {"passed": "通过 (AI辅助)" if item.get("kind") == "manual" else "通过", "failed": "失败", "blocked": "阻塞", "invalid": "阻塞", "stale": "待执行", "missing": "待执行"}[item["status"]] for item in self._check_statuses(state, contract)}
         try:
             documents = projected_documents(self.root, plan, state, statuses)
         except (ValueError, OSError, UnicodeError) as exc:
@@ -1154,7 +1283,7 @@ class Gate:
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
                         stream.write(content)
-                    os.replace(temp_name, path)
+                    replace_file_atomic(temp_name, path)
                 finally:
                     if os.path.exists(temp_name):
                         os.unlink(temp_name)
@@ -1165,6 +1294,14 @@ class Gate:
         self.integrity()
         self._sync_document_projections(state, run_dir)
         return {"ok": True, "task_id": state["task_id"]}
+
+    def record_design_review(self, reviewer: str, reason: str, evidence: list[str]) -> dict[str, Any]:
+        from .checks import record_design_review
+        return record_design_review(self, reviewer, reason, evidence)
+
+    def record_check(self, check_id: str, result: str, candidate: str, reviewer: str, reason: str, evidence: list[str]) -> dict[str, Any]:
+        from .checks import record_check
+        return record_check(self, check_id, result, candidate, reviewer, reason, evidence)
 
     @staticmethod
     def _agent_invocations(run_dir: Path) -> list[dict[str, Any]]:
@@ -1183,7 +1320,22 @@ class Gate:
                 output = self._safe_repo_path(entry["result_path"])
                 if output.is_file() and sha256_bytes(json.dumps(read_json(output), sort_keys=True, ensure_ascii=False).encode("utf-8")) == digest:
                     return
-        raise GateError(f"Missing completed execution receipt for {agent_type}; inspect status.agent_invocations and status.agent_observer for pending completion, missing/invalid output, identity conflict, unsupported mode or stale inputs. Wait for active execution; confirm failed/unsupported execution has ended before a fresh ordinary role dispatch. Submit its unchanged JSON result.")
+        # Recover native delivery cancelled after Handback, without asking the
+        # model to reproduce an already completed analysis. No synthesized hooks.
+        from .runtime import recover
+        try:
+            recovered = recover(self.root)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self._event(state["task_id"], "runtime_recovery_error", error_type=type(exc).__name__, detail=str(exc))
+        else:
+            if recovered["recovered_events"]:
+                with observer_lock(self.control):
+                    matching = completed_results(self._agent_invocations(run_dir), agent_type, digest, state.get("evidence_epoch", 0), bundle_sha256, execution_context(state))
+                    for entry in matching:
+                        output = self._safe_repo_path(entry["result_path"])
+                        if output.is_file() and sha256_bytes(json.dumps(read_json(output), sort_keys=True, ensure_ascii=False).encode("utf-8")) == digest:
+                            return
+        raise GateError(f"Missing completed execution receipt for {agent_type}; run recover-runtime and inspect doctor --session-id <native-session-id> before redispatch. Inspect status.agent_invocations for pending completion, missing/invalid output, identity conflict, unsupported mode or stale inputs. Wait for active execution; confirm failed/unsupported execution has ended before a fresh ordinary role dispatch. Submit its unchanged JSON result.")
 
     def _next_actions(self, state: dict[str, Any], contract: dict[str, Any] | None) -> list[str]:
         if state.get("status") == "needs_human":
@@ -1199,16 +1351,35 @@ class Gate:
         if contract is None:
             return ["Dispatch Intent Analyst and resolve blocking choices" if state.get("status") != "intent_approved" else "Dispatch Contract Planner and register-contract"]
         if state["current_stage"] == "design":
+            from .managed import enabled
+            if enabled(contract):
+                return ["Run req/des/task/chk/local verify; prepare executable tests in Design (test --auto --gen-only when applicable)",
+                        "Derive/register Work Plan from TASK; record-design-review as AI coordinator; freeze tests and support files; collect required Red; advance --to build"]
             return ["Complete method Design; register-work-plan; freeze-tests; collect required Red; advance --to build"]
         if state["current_stage"] == "build":
-            return ["Use work-item commands for status; complete method Build/Review", "Run every missing/failed/stale required check, then advance --to verify"]
+            return ["Use work-item commands for status; complete method Build/Review", "Resolve pending_checks with run-tests and pending_attestations with record-check, then advance --to verify"]
         if state["current_stage"] == "verify":
             return ["prepare-verifier; dispatch independent Verifier; record-verdict; advance --to delivery_ready"]
         return ["advance --to design after finalized Intent and registered Contract"]
 
     def _validate_available_method_skills(self, contract: dict[str, Any]) -> list[str]:
         from .methods import available_skill_errors
-        return available_skill_errors(self.root, contract)
+        errors = available_skill_errors(self.root, contract)
+        from .managed import enabled, read_policy
+        if enabled(contract):
+            try:
+                policy = read_policy(self.root)
+                for prefix in contract.get("evidence_paths", []):
+                    if self._safe_repo_path(prefix).is_file():
+                        errors.append(f"Evidence directory is an existing file: {prefix}")
+                for check in contract.get("required_checks", []):
+                    if check.get("kind") == "manual" and policy["effective"]["manual"] == "disabled":
+                        errors.append("Contract requires manual evidence but zsspec.yml disables it")
+                    if check.get("mode") == "auto" and policy["effective"]["e2e"] == "disabled":
+                        errors.append("Contract requires auto evidence but zsspec.yml disables e2e")
+            except (GateError, OSError, UnicodeError) as exc:
+                errors.append(str(exc))
+        return errors
 
     def _check_method_steps(self, state: dict[str, Any], contract: dict[str, Any], phases: tuple[str, ...]) -> None:
         if not state.get("method_observations_required"):
@@ -1234,13 +1405,15 @@ class Gate:
 
     def _check_design_ready(self, state: dict[str, Any], run_dir: Path, contract: dict[str, Any]) -> None:
         self.integrity()
+        from .checks import require_design_review
+        require_design_review(self, state, run_dir, contract)
         self._check_method_steps(state, contract, ("design",))
         missing = [rel for rel in contract.get("design_artifacts", []) if not self._safe_repo_path(rel).is_file()]
         if missing:
             raise GateError("Missing required design artifacts: " + ", ".join(missing))
         required_tests = contract.get("test_files", [])
         if required_tests:
-            if set(state.get("frozen_tests", {})) != set(required_tests):
+            if set(state.get("frozen_tests", {})) != set(required_tests + contract.get("test_support_files", [])):
                 raise GateError("Freeze all contract.test_files before entering build")
             red_targets = {item.get("target") for item in state.get("test_runs", []) if item["suite"] == "red" and item["valid_red"]}
             missing_red = sorted(set(contract.get("red_test_files", required_tests)) - red_targets)
@@ -1338,7 +1511,9 @@ def validate_contract(contract: Any) -> list[str]:
         errors.append("task_id must be a non-empty string")
     if not isinstance(contract.get("title"), str) or not contract.get("title"):
         errors.append("title must be a non-empty string")
-    for key in ("code_paths", "design_artifacts", "test_files"):
+    for key in ("code_paths", "design_artifacts", "test_files", "test_support_files"):
+        if key == "test_support_files" and key not in contract:
+            continue
         values = contract.get(key)
         if not isinstance(values, list) or any(not isinstance(item, str) or not item for item in values):
             errors.append(f"{key} must be an array of non-empty relative paths")
@@ -1373,7 +1548,7 @@ def validate_contract(contract: Any) -> list[str]:
     max_attempts = contract.get("max_repair_attempts", 3)
     if not isinstance(max_attempts, int) or isinstance(max_attempts, bool) or max_attempts < 1:
         errors.append("max_repair_attempts must be a positive integer")
-    for key in ("code_paths", "design_artifacts", "test_files"):
+    for key in ("code_paths", "design_artifacts", "test_files", "test_support_files", "evidence_paths"):
         paths = contract.get(key)
         if not isinstance(paths, list):
             continue
@@ -1384,6 +1559,8 @@ def validate_contract(contract: Any) -> list[str]:
             windows = PureWindowsPath(value)
             if posix.is_absolute() or windows.is_absolute() or windows.drive or ".." in posix.parts:
                 errors.append(f"{key} must not contain absolute paths or parent traversal: {value}")
+            if key in ("design_artifacts", "test_files", "test_support_files") and any(char in value for char in "*?[]"):
+                errors.append(f"{key} requires concrete file paths, not globs: {value}; enumerate planned files before registering the Contract")
     red_files = contract.get("red_test_files", contract.get("test_files", []))
     if not isinstance(red_files, list) or any(not isinstance(path, str) or path not in contract.get("test_files", []) for path in red_files):
         errors.append("red_test_files must be a subset of test_files")
@@ -1394,8 +1571,8 @@ def validate_contract(contract: Any) -> list[str]:
         ids: set[str] = set()
         acceptance_ids = {item.get("id") for item in contract.get("acceptance_items", []) if isinstance(item, dict) and isinstance(item.get("id"), str)}
         for check in checks:
-            if not isinstance(check, dict) or not {"id", "suite", "acceptance_items"}.issubset(check) or set(check) - {"id", "suite", "target", "acceptance_items"}:
-                errors.append("each required check needs id, suite, acceptance_items, and optional target")
+            if not isinstance(check, dict) or not {"id", "acceptance_items"}.issubset(check) or set(check) - {"id", "suite", "target", "acceptance_items", "kind", "mode"}:
+                errors.append("each required check needs id, acceptance_items, and a command suite or static/manual kind")
                 continue
             check_id = check.get("id")
             if not isinstance(check_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", check_id) or check_id in ids:
@@ -1403,10 +1580,21 @@ def validate_contract(contract: Any) -> list[str]:
             if isinstance(check_id, str):
                 ids.add(check_id)
             suite = check.get("suite")
+            kind = check.get("kind", "command")
             commands = contract.get("test_commands", {})
             command = commands.get(suite, []) if isinstance(commands, dict) and isinstance(suite, str) else []
-            if suite == "red" or not command:
+            if kind not in ("command", "static", "manual"):
+                errors.append("required check kind must be command, static or manual")
+            if kind == "command" and (suite == "red" or not command):
                 errors.append("required check suite must name a configured non-red test command")
+            if kind != "command":
+                from .managed import enabled
+                if not enabled(contract):
+                    errors.append("Non-command checks require zsspec-managed-v1")
+                if any(key in check for key in ("suite", "target", "mode")):
+                    errors.append("static/manual checks do not declare a command suite, target or mode")
+            if "mode" in check and (kind != "command" or check["mode"] != "auto"):
+                errors.append("command check mode may only be auto")
             target = check.get("target")
             if target is not None and (not isinstance(target, str) or not target):
                 errors.append("required check target must be a non-empty string when present")
@@ -1417,6 +1605,8 @@ def validate_contract(contract: Any) -> list[str]:
             refs = check.get("acceptance_items")
             if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) or ref not in acceptance_ids for ref in refs):
                 errors.append("required check must reference known acceptance items")
+    from .managed import validation_errors
+    errors.extend(validation_errors(contract))
     return errors
 
 

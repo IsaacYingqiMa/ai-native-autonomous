@@ -43,6 +43,10 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "Skill",
+        "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-method", "timeout": 15}]
+      },
+      {
         "matcher": "Agent",
         "hooks": [{"type": "command", "command": "python \"${CLAUDE_PROJECT_DIR}/scripts/aidevflow_hook.py\" trace-agent", "timeout": 15}]
       },
