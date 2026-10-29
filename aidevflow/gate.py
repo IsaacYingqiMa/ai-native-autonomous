@@ -15,6 +15,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .adapters import projected_documents, semantic_content, validate_projections
+from .runtimes import binding as runtime_binding, selected as selected_runtime
+from .locking import writes
 
 
 SCHEMA = "aidevflow/run-state-v1"
@@ -30,6 +32,10 @@ ASSERTION_FAILURE_MARKERS = ("assertionerror", "assertion failure", "fail:", "fa
 
 class GateError(Exception):
     """An expected workflow or input validation error."""
+
+
+def check_acceptable(item: dict, contract: dict) -> bool:
+    return item["status"] == "passed" or (item["status"] == "passed_with_waivers" and contract.get("test_policy", {}).get("allow_approved_waivers") is True)
 
 
 def utc_now() -> str:
@@ -90,6 +96,31 @@ def write_json_atomic(path: Path, value: Any) -> None:
         raise
 
 
+def write_json_new(path: Path, value: Any) -> None:
+    """An immutable record: even an identity collision cannot replace evidence."""
+    write_bytes_new(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+
+
+def write_bytes_new(path: Path, content: bytes) -> None:
+    """Publish complete bytes atomically without replacing an existing object."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".pending-")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name == "nt":
+            # Windows rename is atomic and refuses an existing destination.
+            # It also works in sandboxes/filesystems which prohibit hard links.
+            os.rename(temporary, path)
+        else:
+            os.link(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def safe_id(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", value):
         raise GateError("task id must use 1-80 letters, digits, dots, underscores, or hyphens")
@@ -127,10 +158,12 @@ class Gate:
 
     def _load_active(self) -> tuple[dict[str, Any], Path, dict[str, Any] | None]:
         if not self.active_path.exists():
-            raise GateError("No active AIDevFlow run. Start one with `aidevflow init`.")
+            raise GateError("No active AIDevFlow run. Start one with `aidevflow start-intake --request <path>`.")
         active = read_json(self.active_path)
         task_id = safe_id(active.get("task_id", ""))
         run_dir = self.runs / task_id
+        if (run_dir / "baseline-transaction.json").is_file():
+            raise GateError("Interrupted baseline transaction; use recover-baseline-transaction --mode finish or rollback before continuing")
         state_path = run_dir / "run-state.json"
         state = read_json(state_path)
         if not isinstance(state, dict) or state.get("schema") != SCHEMA or state.get("task_id") != task_id:
@@ -138,6 +171,16 @@ class Gate:
         # Older v1 run snapshots remain readable; task-level tracking is opt-in.
         state.setdefault("work_plan", None)
         state.setdefault("work_items", [])
+        state.setdefault("revision", 0)
+        binding_ref = state.get("execution_binding_ref")
+        if "execution_binding" in state or binding_ref is not None:
+            if (not isinstance(state.get("execution_binding"), dict) or not isinstance(binding_ref, dict)
+                    or not isinstance(binding_ref.get("path"), str) or not isinstance(binding_ref.get("sha256"), str)):
+                raise GateError("Execution binding or its integrity reference is invalid")
+            pinned = self._safe_repo_path(binding_ref["path"])
+            pinned.relative_to(run_dir)
+            if sha256_file(pinned) != binding_ref["sha256"] or read_json(pinned) != state.get("execution_binding"):
+                raise GateError("Execution binding changed; cross-runtime handoff is not supported")
         if state.get("contract_path") is None:
             if state.get("current_stage") != "intent":
                 raise GateError("An execution contract is required after the Intent stage")
@@ -203,6 +246,7 @@ class Gate:
                         raise GateError(f"AIDevFlow work item evidence snapshot changed or cites mutable Gate state: {entry['path']}")
         return state, run_dir, contract
 
+    @writes
     def start_intake(self, request_path: str) -> dict[str, Any]:
         """Start a durable, contract-free intake from a natural-language request file."""
         base_commit = self._assert_git_root()
@@ -238,6 +282,7 @@ class Gate:
             "autonomy_policy": "clarify_then_auto",
             "reliability_version": 3,
             "agent_receipts_required": True,
+            "execution_binding": runtime_binding(self.root),
             "method_observations_required": False,
             "execution_policy": {"schema": "aidevflow/execution-policy-v1",
                                  "method_evidence": "artifact_gated",
@@ -259,11 +304,15 @@ class Gate:
             "created_at": utc_now(),
             "updated_at": utc_now(),
         }
+        binding_path = run_dir / "execution-binding.json"
+        write_json_atomic(binding_path, state["execution_binding"])
+        state["execution_binding_ref"] = {"path": binding_path.relative_to(self.root).as_posix(), "sha256": sha256_file(binding_path)}
         self._event(task_id, "intake_started", stage="intent", request_path=state["request_path"], request_sha256=state["request_sha256"], state_snapshot=state)
         write_json_atomic(run_dir / "run-state.json", state)
         write_json_atomic(self.active_path, {"task_id": task_id, "state_path": (run_dir / "run-state.json").relative_to(self.root).as_posix()})
         return state
 
+    @writes
     def register_contract(self, draft_path: str) -> dict[str, Any]:
         """Validate and pin the generated task contract after Intent is resolved."""
         state, run_dir, current_contract = self._load_active()
@@ -307,10 +356,12 @@ class Gate:
     def _event(self, task_id: str, event: str, **fields: Any) -> None:
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
         record = {"ts": utc_now(), "task_id": task_id, "event": event, **fields}
-        with self.events_path.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+        from .locking import observer_lock
+        with observer_lock(self.control, name="event-log.lock"):
+            with self.events_path.open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
 
     def _pin_method_policy(self, state: dict[str, Any], run_dir: Path, contract: dict[str, Any]) -> None:
         from .managed import enabled, package_manifest, read_policy
@@ -329,11 +380,13 @@ class Gate:
             state["method_observations_required"] = state.get("execution_policy", {}).get("method_evidence") != "artifact_gated"
 
     def _save(self, state: dict[str, Any], run_dir: Path, event: str, **fields: Any) -> None:
+        state["revision"] = state.get("revision", 0) + 1
         state["updated_at"] = utc_now()
         self._event(state["task_id"], event, stage=state["current_stage"], status=state["status"], state_snapshot=state, **fields)
         write_json_atomic(run_dir / "run-state.json", state)
         self._sync_document_projections(state, run_dir)
 
+    @writes
     def init(self, task_id: str, contract_path: str) -> dict[str, Any]:
         task_id = safe_id(task_id)
         base_commit = self._assert_git_root()
@@ -365,6 +418,7 @@ class Gate:
             "contract_sha256": sha256_file(contract_abs),
             "current_stage": "intent",
             "status": "active",
+            "execution_binding": runtime_binding(self.root),
             "base_commit": base_commit,
             "intent_draft_path": None,
             "intent_path": None,
@@ -380,15 +434,24 @@ class Gate:
             "updated_at": utc_now(),
         }
         run_dir.mkdir(parents=True)
+        binding_path = run_dir / "execution-binding.json"
+        write_json_atomic(binding_path, state["execution_binding"])
+        state["execution_binding_ref"] = {"path": binding_path.relative_to(self.root).as_posix(), "sha256": sha256_file(binding_path)}
         self._pin_method_policy(state, run_dir, contract)
         self._event(task_id, "run_started", stage="intent", contract_path=contract_rel, state_snapshot=state)
         write_json_atomic(run_dir / "run-state.json", state)
         write_json_atomic(self.active_path, {"task_id": task_id, "state_path": (run_dir / "run-state.json").relative_to(self.root).as_posix()})
         return state
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, summary: bool = False) -> dict[str, Any]:
         state, run_dir, contract = self._load_active()
+        if summary:
+            return {**{key: state.get(key) for key in ("task_id", "current_stage", "status", "revision", "evidence_epoch", "updated_at", "baseline_ref")},
+                    "runtime": selected_runtime(self.root, state),
+                    "next_actions": self._next_actions(state, contract), "candidate_freshness": "not_checked"}
         result = dict(state)
+        from .recovery import diagnose
+        result["evidence_health"] = diagnose(self, history=False)
         result["next_actions"] = self._next_actions(state, contract)
         result["agent_invocations"] = self._agent_invocations(run_dir)
         continuation = run_dir / "continuation.json"
@@ -405,11 +468,11 @@ class Gate:
             if state.get("method_policy"):
                 result["method_policy_details"] = read_json(self._safe_repo_path(state["method_policy"]["path"]))
             result["candidate_sha256"] = self._candidate(state, contract)["sha256"]
-            result["checks"] = self._check_statuses(state, contract)
+            result["checks"] = self._check_statuses(state, contract, candidate=result["candidate_sha256"])
             pending = {}
             attestations = []
             for check in result["checks"]:
-                if check["status"] != "passed":
+                if not check_acceptable(check, contract):
                     if check.get("kind", "command") != "command":
                         attestations.append({"id": check["id"], "kind": check["kind"], "status": check["status"],
                                              "action": "Inspect current candidate, then record-check with fresh report/screenshot evidence"})
@@ -422,7 +485,10 @@ class Gate:
             result["pending_attestations"] = attestations
             if state["current_stage"] == "verify" and state["status"] == "active" and pending:
                 result["next_actions"] = ["Run status.pending_checks once per suite/target in the current environment; Verify permits check reruns without reopening completed work items", "prepare-verifier; dispatch independent Verifier; record-verdict; advance --to delivery_ready"]
-            result["verdict_current"] = bool(state.get("verdict_ref") and state.get("verifier_bundle") and state["verifier_bundle"].get("candidate_sha256") == result["candidate_sha256"] and all(item["status"] == "passed" for item in result["checks"]))
+            result["verdict_current"] = bool(state.get("verdict_ref") and state.get("verifier_bundle") and state["verifier_bundle"].get("candidate_sha256") == result["candidate_sha256"] and all(check_acceptable(item, contract) for item in result["checks"]))
+            if not result["evidence_health"]["ok"] or result["evidence_health"]["pending_replacements"]:
+                result["verdict_current"] = False
+                result["next_actions"] = ["diagnose-evidence; plan-evidence-repair --reason <cause>; review/apply the plan; run real replacement checks"]
             if result["verdict_current"]:
                 report = run_dir / "verifier-report.json"
                 try:
@@ -434,6 +500,7 @@ class Gate:
                 result["next_actions"] = ["Acceptance evidence is stale/changed; route review_finding to Build and capture fresh checks and verification"]
         return result
 
+    @writes
     def archive(self) -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
         if state["current_stage"] != "delivery_ready" and state["status"] != "needs_human":
@@ -446,8 +513,11 @@ class Gate:
         self.active_path.unlink(missing_ok=True)
         return {"task_id": state["task_id"], "status": state["status"], "archive_record": archived.relative_to(self.root).as_posix()}
 
+    @writes
     def rebuild(self, task_id: str) -> dict[str, Any]:
         task_id = safe_id(task_id)
+        if (self.runs / task_id / "baseline-transaction.json").is_file():
+            raise GateError("Interrupted baseline transaction; use recover-baseline-transaction before rebuild")
         if self.active_path.is_file() and read_json(self.active_path).get("task_id") != task_id:
             raise GateError("Cannot replace a different active run during rebuild; archive it explicitly first")
         if not self.events_path.is_file():
@@ -472,6 +542,7 @@ class Gate:
         self._event(task_id, "state_rebuilt", stage=recovered["current_stage"], status=recovered["status"], state_snapshot=recovered)
         return recovered
 
+    @writes
     def record_intent(self, draft_path: str) -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
         self._require_stage(state, "intent")
@@ -515,6 +586,7 @@ class Gate:
         self._save(state, run_dir, "intent_draft_recorded", unresolved_blockers=unresolved, sha256=sha256_file(target))
         return {"status": state["status"], "unresolved_blockers": unresolved, "draft_path": state["intent_draft_path"]}
 
+    @writes
     def answer(self, question_id: str, option_id: str | None, answer_text: str) -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
         self._require_stage(state, "intent")
@@ -539,6 +611,7 @@ class Gate:
         self._save(state, run_dir, "intent_question_answered", question_id=question_id, option_id=option_id, unresolved_blockers=unresolved)
         return {"status": state["status"], "unresolved_blockers": unresolved}
 
+    @writes
     def finalize_intent(self) -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
         self._require_stage(state, "intent")
@@ -571,6 +644,7 @@ class Gate:
         self._save(state, run_dir, "intent_finalized", path=state["intent_path"], sha256=state["intent_sha256"], approval=approval)
         return {"path": state["intent_path"], "sha256": state["intent_sha256"], "status": state["status"], "approval_mode": "autonomous_after_blockers" if approval else "user_review_required"}
 
+    @writes
     def approve_intent(self, by: str, utterance: str) -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
         self._require_stage(state, "intent")
@@ -588,6 +662,7 @@ class Gate:
         self._save(state, run_dir, "intent_approved", approval=approval)
         return {"status": state["status"], "approval": approval}
 
+    @writes
     def advance(self, to_stage: str) -> dict[str, Any]:
         state, run_dir, contract = self._load_active()
         self._require_executable(state)
@@ -614,15 +689,13 @@ class Gate:
         elif state["current_stage"] == "verify":
             self._check_verifier_passed(state, run_dir, contract)
         state["current_stage"] = to_stage
-        state["status"] = "delivery_ready" if to_stage == "delivery_ready" else "active"
+        state["status"] = ("delivery_ready_with_exceptions" if state.get("accepted_with_exceptions") else "delivery_ready") if to_stage == "delivery_ready" else "active"
         self._save(state, run_dir, "stage_advanced", to_stage=to_stage)
         return state
 
+    @writes
     def freeze_tests(self, paths: list[str]) -> dict[str, str]:
         state, run_dir, contract = self._load_active()
-        self._require_stage(state, "design")
-        from .checks import require_design_review
-        require_design_review(self, state, run_dir, contract)
         required = contract.get("test_files", []) + contract.get("test_support_files", [])
         requested = paths or required
         if required and set(requested) != set(required):
@@ -631,7 +704,14 @@ class Gate:
             raise GateError("No test files declared; set contract.test_files before freezing")
         if state.get("frozen_tests"):
             self.integrity()
-            raise GateError("Tests are already frozen; the Red baseline cannot be replaced")
+            if set(requested) == set(state["frozen_tests"]):
+                return state["frozen_tests"]
+            raise GateError("Use plan-baseline-revision to change the frozen file set")
+        self._require_stage(state, "design")
+        from .checks import require_design_review
+        require_design_review(self, state, run_dir, contract)
+        from .baselines import require_support, snapshot
+        require_support(self, contract)
         hashes: dict[str, str] = {}
         for rel in requested:
             path = self._safe_repo_path(rel)
@@ -639,10 +719,12 @@ class Gate:
                 raise GateError(f"Test file does not exist: {rel}")
             hashes[rel] = sha256_file(path)
         state["frozen_tests"] = hashes
+        state["baseline_ref"] = snapshot(self, state, contract)
         write_json_atomic(run_dir / "test-manifest.json", {"schema": "aidevflow/test-manifest-v1", "files": hashes, "frozen_at": utc_now()})
         self._save(state, run_dir, "tests_frozen", files=hashes)
         return hashes
 
+    @writes
     def register_work_plan(self, draft_path: str) -> dict[str, Any]:
         """Pin a method-neutral work plan for task-level lifecycle tracking."""
         state, run_dir, contract = self._load_active()
@@ -690,6 +772,7 @@ class Gate:
         self._save(state, run_dir, "work_plan_registered", path=state["work_plan"]["path"], sha256=digest, item_ids=[item["id"] for item in state["work_items"]])
         return {"path": state["work_plan"]["path"], "sha256": digest, "work_items": state["work_items"]}
 
+    @writes
     def start_work_item(self, work_item_id: str) -> dict[str, Any]:
         state, run_dir, contract = self._load_active()
         self._require_stage(state, "build")
@@ -710,6 +793,7 @@ class Gate:
         self._save(state, run_dir, "work_item_started", work_item_id=work_item_id)
         return item
 
+    @writes
     def complete_work_item(self, work_item_id: str, evidence_paths: list[str]) -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
         self._require_stage(state, "build")
@@ -766,6 +850,7 @@ class Gate:
         self._save(state, run_dir, "work_item_completed", work_item_id=work_item_id, evidence=evidence)
         return item
 
+    @writes
     def reopen_work_item(self, work_item_id: str, reason: str) -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
         self._require_stage(state, "build")
@@ -824,16 +909,49 @@ class Gate:
             if not isinstance(evidence, list) or any(not isinstance(entry, dict) or not isinstance(entry.get("path"), str) or not isinstance(entry.get("sha256"), str) for entry in evidence):
                 raise GateError(f"AIDevFlow work item evidence is malformed: {item['id']}")
 
+    @writes
     def integrity(self) -> list[str]:
         state, run_dir, contract = self._load_active()
         mismatches = []
+        if state.get("baseline_ref"):
+            from .recovery import owned_json
+            baseline = owned_json(self, run_dir, state["baseline_ref"], "baselines")
+            from .checks import intact
+            if not intact(self, list(baseline["files"].values()), run_dir):
+                raise GateError("Immutable baseline snapshots changed; restore the original objects from backup before continuing")
+            for rel in contract.get("design_artifacts", []):
+                entry = baseline["files"].get(rel)
+                live = self._safe_repo_path(rel)
+                if not entry or not live.is_file() or semantic_content(rel, live.read_bytes(), self._plan(state)) != semantic_content(rel, self._safe_repo_path(entry["path"]).read_bytes(), self._plan(state)):
+                    mismatches.append(rel)
+        if contract and state.get("baseline_ref"):
+            from .baselines import require_support
+            require_support(self, contract)
+        manifest_path = self.control / "runtime-manifest.json"
+        if selected_runtime(self.root, state) == "omp" and manifest_path.is_file():
+            # Shared project defaults may change for future runs. Executable
+            # adapters, roles and schemas must still match the installation.
+            prefixes = (".aidevflow/runtime/", ".aidevflow/schemas/", ".omp/extensions/aidevflow/",
+                        ".omp/agents/aidevflow-", ".omp/skills/aidevflow-flow/",
+                        "scripts/aidevflow.py", "scripts/aidevflow_bridge.py", "scripts/aidevflow_browser.py")
+            manifest = read_json(manifest_path)
+            if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
+                raise GateError("Runtime installation manifest is invalid")
+            for rel, expected in manifest["files"].items():
+                if not isinstance(rel, str) or not isinstance(expected, str):
+                    raise GateError("Runtime installation manifest entries are invalid")
+                if rel.startswith(prefixes):
+                    file = self._safe_repo_path(rel)
+                    if not file.is_file() or sha256_file(file) != expected:
+                        mismatches.append(rel)
         from .managed import enabled, file_hash, package_manifest
         if enabled(contract):
             policy = read_json(self._safe_repo_path(state["method_policy"]["path"]))
             if file_hash(self.root / policy["config_path"]) != policy["config_sha256"]:
                 mismatches.append(policy["config_path"])
-            if package_manifest(self.root, contract) != policy["package"]:
-                mismatches.append(".claude/skills (pinned method package)")
+            if package_manifest(self.root, contract, version=policy["package"].get("manifest_version", 1)) != policy["package"]:
+                from .runtimes import skills_root
+                mismatches.append(f"{skills_root(self.root).relative_to(self.root).as_posix()} (pinned method package)")
         for rel, expected in state.get("frozen_tests", {}).items():
             path = self._safe_repo_path(rel)
             if not path.is_file() or sha256_file(path) != expected:
@@ -852,7 +970,8 @@ class Gate:
             raise GateError("Frozen test or specification integrity mismatch: " + ", ".join(mismatches))
         return mismatches
 
-    def run_tests(self, suite: str, target: str | None = None, evidence_paths: list[str] | None = None) -> dict[str, Any]:
+    @writes
+    def run_tests(self, suite: str, target: str | None = None, evidence_paths: list[str] | None = None, *, against_base: bool = False) -> dict[str, Any]:
         state, run_dir, contract = self._load_active()
         self._require_executable(state)
         if evidence_paths:
@@ -882,6 +1001,11 @@ class Gate:
             raise GateError(f"{suite} suite cannot run until Build")
         command = [arg.replace("{target}", target or "") for arg in command]
         candidate = self._candidate(state, contract)
+        from .test_execution import replay, prepare_report, summary, apply_waivers
+        if against_base and suite != "red":
+            raise GateError("--against-base is only for behavioral Red on the original implementation")
+        cwd, executed_command = replay(self, state, contract, command) if against_base else (self.root, command)
+        executed_command, test_report = prepare_report(self, state, suite, executed_command, cwd)
         prior_artifacts = {}
         for rel in evidence_paths or []:
             path = self._safe_repo_path(rel)
@@ -890,7 +1014,11 @@ class Gate:
         try:
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
-            result = subprocess.run(command, cwd=self.root, text=True, encoding="utf-8", errors="replace", capture_output=True, check=False, env=env, timeout=contract.get("test_timeout_seconds", 300))
+            if test_report:
+                env["AIDEVFLOW_TEST_REPORT"] = test_report["path"]
+                if any(arg == "pytest" or Path(arg).stem.lower() == "pytest" for arg in command[:4]) and (env.get("PYTEST_ADDOPTS") or env.get("PYTEST_PLUGINS")):
+                    raise GateError("Declare pytest selection/plugins in frozen argv/config, not PYTEST_ADDOPTS/PYTEST_PLUGINS")
+            result = subprocess.run(executed_command, cwd=cwd, text=True, encoding="utf-8", errors="replace", capture_output=True, check=False, env=env, timeout=contract.get("test_timeout_seconds", 300))
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
             result = subprocess.CompletedProcess(command, 124, stdout, "Test command timed out")
@@ -899,9 +1027,10 @@ class Gate:
         safe_suite = re.sub(r"[^A-Za-z0-9._-]", "_", suite)
         evidence_dir = run_dir / "evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
-        evidence = evidence_dir / f"{len(state['test_runs']) + 1:03d}-{safe_suite}.json"
+        execution_id = secrets.token_hex(16)
+        evidence = evidence_dir / f"{execution_id}-{safe_suite}.json"
         record = {
-            "suite": suite, "command": command, "exit_code": result.returncode,
+            "id": execution_id, "suite": suite, "command": executed_command, "exit_code": result.returncode,
             "target": target,
             "started_at": started, "finished_at": utc_now(),
             "stdout": result.stdout, "stderr": result.stderr,
@@ -910,8 +1039,23 @@ class Gate:
             "evidence_epoch": state.get("evidence_epoch", 0),
             "candidate_changed": self._candidate(state, contract)["sha256"] != candidate["sha256"],
         }
+        from .recovery import baseline_id, replaced
+        record["baseline_id"] = baseline_id(state)
+        if against_base:
+            record["replay_base_commit"] = state["base_commit"]
         record["passed"] = result.returncode == 0 and not record["candidate_changed"]
         record["valid_red"] = suite != "red" or (not record["candidate_changed"] and valid_red_result(result.returncode, result.stdout + result.stderr))
+        if suite != "red":
+            coverage = apply_waivers(self, state, contract, suite, target, summary(test_report, result.stdout + result.stderr))
+            if coverage is not None:
+                record["coverage"] = coverage
+                record["accepted_with_exceptions"] = bool(record["passed"] and coverage.get("accepted_with_exceptions"))
+                record["passed"] = bool(record["passed"] and coverage["ok"])
+            if test_report and Path(test_report["path"]).is_file():
+                from .recovery import put_blob
+                blob = put_blob(run_dir / "test-report-objects", Path(test_report["path"]).read_bytes())
+                blob["path"] = Path(blob["path"]).relative_to(self.root).as_posix()
+                record.setdefault("artifacts", []).append(blob)
         if evidence_paths:
             from .checks import snapshot_files
             try:
@@ -919,24 +1063,31 @@ class Gate:
                     path = self._safe_repo_path(rel)
                     if path.is_file() and prior_artifacts[rel] == (sha256_file(path), path.stat().st_mtime_ns):
                         raise GateError(f"Evidence was not refreshed by this command: {rel}")
-                record["artifacts"] = snapshot_files(self, state, contract, evidence_paths, "test-artifacts")
+                record.setdefault("artifacts", []).extend(snapshot_files(self, state, contract, evidence_paths, "test-artifacts"))
             except GateError as exc:
                 record["artifact_error"] = str(exc)
                 record["passed"] = False
                 record["valid_red"] = False
-        write_json_atomic(evidence, record)
+                record["accepted_with_exceptions"] = False
+        replaced(state, record)
+        write_json_new(evidence, record)
         record["evidence_sha256"] = sha256_file(evidence)
-        state["test_runs"].append({key: record[key] for key in ("suite", "target", "exit_code", "passed", "valid_red", "evidence_path", "evidence_sha256", "finished_at", "candidate_sha256", "evidence_epoch", "candidate_changed", "artifacts", "artifact_error") if key in record})
+        state["test_runs"].append({key: record[key] for key in ("id", "suite", "target", "exit_code", "passed", "valid_red", "evidence_path", "evidence_sha256", "finished_at", "candidate_sha256", "evidence_epoch", "candidate_changed", "artifacts", "artifact_error", "baseline_id", "coverage", "replay_base_commit", "accepted_with_exceptions", "replaces_incidents") if key in record})
         state["verifier_bundle"] = None
         state.pop("verdict_ref", None)
+        state.pop("accepted_with_exceptions", None)
+        state.pop("waived_acceptance_items", None)
         if state.get("status") in ("accepted", "retrying"):
             state["status"] = "active"
         self._save(state, run_dir, "test_executed", suite=suite, target=target, exit_code=result.returncode, passed=record["passed"], valid_red=record["valid_red"], evidence_path=record["evidence_path"], evidence_sha256=record["evidence_sha256"])
         return record
 
+    @writes
     def prepare_verifier(self) -> dict[str, Any]:
         state, run_dir, contract = self._load_active()
         self._require_stage(state, "verify")
+        from .recovery import require_healthy
+        require_healthy(self, state, run_dir)
         self._check_build_ready(state, contract)
         if state.get("verifier_bundle"):
             self._check_candidate_bundle(state, contract)
@@ -1005,7 +1156,40 @@ class Gate:
                 "work_plan_sha256": state["work_plan"]["sha256"],
                 "items": state.get("work_items", []),
             })
-        for item in state["test_runs"]:
+        from .recovery import effective_records, owned_json
+        def include_reference(ref, bucket):
+            value = owned_json(self, run_dir, ref, bucket)
+            files.append(self._safe_repo_path(ref["path"]))
+            return value
+
+        baseline_ref = state.get("baseline_ref")
+        while baseline_ref:
+            baseline = include_reference(baseline_ref, "baselines")
+            for entry in baseline.get("files", {}).values():
+                if not intact(self, [entry], run_dir):
+                    raise GateError("Baseline snapshot object changed")
+                files.append(self._safe_repo_path(entry["path"]))
+            if baseline.get("proposal"):
+                include_reference(baseline["proposal"], "baseline-proposals")
+            for key in ("contract", "work_plan"):
+                if baseline.get(key):
+                    ref = baseline[key]
+                    path = self._safe_repo_path(ref["path"])
+                    if not path.is_file() or sha256_file(path) != ref["sha256"]:
+                        raise GateError("Historical baseline metadata changed")
+                    files.append(path)
+            baseline_ref = baseline.get("parent")
+        for ref in state.get("test_waivers", []):
+            include_reference(ref, "test-waivers")
+        for ref in state.get("evidence_repairs", []):
+            repair = owned_json(self, run_dir, ref, "evidence-repairs")
+            files.append(self._safe_repo_path(ref["path"]))
+            for incident in repair["incidents"]:
+                files.extend(self._safe_repo_path(blob["path"]) for blob in incident.get("snapshots", []))
+        ledger = run_dir / "execution-ledger.json"
+        write_json_atomic(ledger, {"test_runs": state["test_runs"], "repairs": state.get("evidence_repairs", [])})
+        files.append(ledger)
+        for item in effective_records(self, state, run_dir):
             evidence = self._safe_repo_path(item["evidence_path"])
             if not evidence.is_file() or sha256_file(evidence) != item.get("evidence_sha256"):
                 raise GateError(f"Recorded test evidence changed: {item['evidence_path']}")
@@ -1070,12 +1254,15 @@ class Gate:
         bundle_dir = writer.publish()
         state["verifier_bundle"] = {"path": bundle_dir.relative_to(self.root).as_posix(), "sha256": bundle_digest, "spec_version": spec_version, "candidate_sha256": candidate["sha256"], "evidence_epoch": state.get("evidence_epoch", 0)}
         state.pop("verdict_ref", None)
+        state.pop("accepted_with_exceptions", None)
+        state.pop("waived_acceptance_items", None)
         state.pop("blocker", None)
         state.setdefault("infrastructure_attempts", {}).pop("prepare-verifier", None)
         state["status"] = "active"
         self._save(state, run_dir, "verifier_bundle_prepared", bundle_sha256=bundle_digest, file_count=len(manifest))
         return state["verifier_bundle"]
 
+    @writes
     def record_verdict(self, verdict_path: str) -> dict[str, Any]:
         state, run_dir, contract = self._load_active()
         self._require_stage(state, "verify")
@@ -1092,13 +1279,18 @@ class Gate:
         destination = run_dir / "verifier-report.json"
         write_json_atomic(destination, verdict)
         state["verdict_ref"] = {"sha256": sha256_file(destination), "bundle_sha256": state["verifier_bundle"]["sha256"]}
-        if all(item["verdict"] == "pass" for item in verdict["items"]):
+        if all(item["verdict"] in ("pass", "waived") for item in verdict["items"]):
             state["status"] = "accepted"
+            state["accepted_with_exceptions"] = any(item["verdict"] == "waived" for item in verdict["items"])
+            state["waived_acceptance_items"] = [item["id"] for item in verdict["items"] if item["verdict"] == "waived"]
         else:
+            state.pop("accepted_with_exceptions", None)
+            state.pop("waived_acceptance_items", None)
             state["status"] = "needs_human" if any(item["verdict"] == "blocked" for item in verdict["items"]) else "retrying"
         self._save(state, run_dir, "verifier_verdict_recorded", passed=state["status"] == "accepted", verdict_path=destination.relative_to(self.root).as_posix())
         return {"status": state["status"], "path": destination.relative_to(self.root).as_posix()}
 
+    @writes
     def route(self, failure_type: str, summary: str) -> dict[str, Any]:
         state, run_dir, contract = self._load_active()
         self._require_executable(state)
@@ -1114,17 +1306,20 @@ class Gate:
             target = "needs_human"
         if target in ("intent", "design"):
             # Changing a pinned specification/test baseline needs an explicit new
-            # version. Until revision support exists, preserve it and escalate.
+            # version. Preserve it and request plan-baseline-revision.
             target = "needs_human"
         state["evidence_epoch"] = state.get("evidence_epoch", 0) + 1
         state["verifier_bundle"] = None
         state.pop("verdict_ref", None)
+        state.pop("accepted_with_exceptions", None)
+        state.pop("waived_acceptance_items", None)
         state["current_stage"] = target if target in STAGES else state["current_stage"]
         state["status"] = "needs_human" if target == "needs_human" else "active"
         state["blocker"] = {"kind": "product", "failure_type": failure_type, "reason": summary}
         self._save(state, run_dir, "failure_routed", failure_type=failure_type, to=target, attempt=attempts[failure_type], summary=summary)
         return {"to": target, "attempt": attempts[failure_type], "status": state["status"]}
 
+    @writes
     def resume_run(self, by: str, utterance: str, additional_attempts: int = 1, mode: str = "repair") -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
         if state.get("status") != "needs_human":
@@ -1146,6 +1341,8 @@ class Gate:
         state["evidence_epoch"] = state.get("evidence_epoch", 0) + 1
         state["verifier_bundle"] = None
         state.pop("verdict_ref", None)
+        state.pop("accepted_with_exceptions", None)
+        state.pop("waived_acceptance_items", None)
         # A failed acceptance resumes implementation, with fresh checks required.
         if state["current_stage"] == "verify":
             state["current_stage"] = "build"
@@ -1182,7 +1379,7 @@ class Gate:
 
     @staticmethod
     def _require_executable(state: dict[str, Any]) -> None:
-        if state.get("status") in ("needs_human", "archived", "delivery_ready"):
+        if state.get("status") in ("needs_human", "archived", "delivery_ready", "delivery_ready_with_exceptions"):
             raise GateError(f"Run is {state['status']}; execution is stopped. A needs_human run requires an explicit resume-run instruction.")
 
     def _plan(self, state: dict[str, Any]) -> dict[str, Any] | None:
@@ -1227,8 +1424,11 @@ class Gate:
                 raise GateError(f"Cannot snapshot candidate file {rel}: {exc}") from exc
         runtime = self.control / "runtime-manifest.json"
         value = {"files": files, "contract_sha256": state.get("contract_sha256"), "evidence_epoch": state.get("evidence_epoch", 0), "runtime_sha256": sha256_file(runtime) if runtime.is_file() else None}
+        if state.get("baseline_ref"):
+            value["baseline_id"] = state["baseline_ref"]["id"]
         if enabled(contract):
-            value["method_package_sha256"] = package_manifest(self.root, contract)["sha256"]
+            from .managed import package_version
+            value["method_package_sha256"] = package_manifest(self.root, contract, version=package_version(self.root, state))["sha256"]
             value["method_config_sha256"] = file_hash(self.root / "specs/zsspec.yml")
         return {**value, "sha256": sha256_bytes(json.dumps(value, sort_keys=True).encode("utf-8"))}
 
@@ -1240,9 +1440,10 @@ class Gate:
         checks.extend(contract.get("required_checks", []))
         return checks
 
-    def _check_statuses(self, state: dict[str, Any], contract: dict[str, Any]) -> list[dict[str, Any]]:
-        candidate = self._candidate(state, contract)["sha256"]
-        latest = {(item["suite"], item.get("target")): item for item in state.get("test_runs", []) if item["suite"] != "red"}
+    def _check_statuses(self, state: dict[str, Any], contract: dict[str, Any], *, candidate: str | None = None) -> list[dict[str, Any]]:
+        candidate = candidate or self._candidate(state, contract)["sha256"]
+        from .recovery import effective_records
+        latest = {(item["suite"], item.get("target")): item for item in effective_records(self, state, self.runs / state["task_id"]) if item["suite"] != "red"}
         results = []
         for check in self._required_checks(contract):
             if check.get("kind", "command") != "command":
@@ -1252,12 +1453,16 @@ class Gate:
             item = latest.get((check["suite"], check.get("target")))
             fresh = bool(item and item.get("candidate_sha256") == candidate and not item.get("candidate_changed"))
             status = "missing" if item is None else "stale" if not fresh else "passed" if item["passed"] else "failed"
+            if item and fresh and item.get("accepted_with_exceptions"):
+                status = "passed_with_waivers"
+            if any((entry["suite"], entry["target"]) == (check["suite"], check.get("target")) for entry in state.get("evidence_recovery_pending", [])):
+                status = "invalid"
             if item:
                 from .checks import intact
                 evidence = self._safe_repo_path(item["evidence_path"])
                 if not evidence.is_file() or sha256_file(evidence) != item.get("evidence_sha256") or not intact(self, item.get("artifacts", []), self.runs / state["task_id"]):
                     status = "invalid"
-            results.append({"id": check["id"], "kind": "command", "suite": check["suite"], "target": check.get("target"), "status": status, "evidence_path": item.get("evidence_path") if item else None})
+            results.append({"id": check["id"], "kind": "command", "suite": check["suite"], "target": check.get("target"), "status": status, "evidence_path": item.get("evidence_path") if item else None, "coverage": item.get("coverage") if item else None})
         return results
 
     def _check_candidate_bundle(self, state: dict[str, Any], contract: dict[str, Any]) -> None:
@@ -1270,7 +1475,7 @@ class Gate:
         if not plan or not plan.get("projections"):
             return
         contract = read_json(self._safe_repo_path(state["contract_path"]))
-        statuses = {item["id"]: {"passed": "通过 (AI辅助)" if item.get("kind") == "manual" else "通过", "failed": "失败", "blocked": "阻塞", "invalid": "阻塞", "stale": "待执行", "missing": "待执行"}[item["status"]] for item in self._check_statuses(state, contract)}
+        statuses = {item["id"]: {"passed": "通过 (AI辅助)" if item.get("kind") == "manual" else "通过", "passed_with_waivers": "有批准例外", "failed": "失败", "blocked": "阻塞", "invalid": "阻塞", "stale": "待执行", "missing": "待执行"}[item["status"]] for item in self._check_statuses(state, contract)}
         try:
             documents = projected_documents(self.root, plan, state, statuses)
         except (ValueError, OSError, UnicodeError) as exc:
@@ -1288,6 +1493,7 @@ class Gate:
                     if os.path.exists(temp_name):
                         os.unlink(temp_name)
 
+    @writes
     def sync_projections(self) -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
         self._require_executable(state)
@@ -1295,13 +1501,49 @@ class Gate:
         self._sync_document_projections(state, run_dir)
         return {"ok": True, "task_id": state["task_id"]}
 
+    @writes
     def record_design_review(self, reviewer: str, reason: str, evidence: list[str]) -> dict[str, Any]:
         from .checks import record_design_review
         return record_design_review(self, reviewer, reason, evidence)
 
+    @writes
     def record_check(self, check_id: str, result: str, candidate: str, reviewer: str, reason: str, evidence: list[str]) -> dict[str, Any]:
         from .checks import record_check
         return record_check(self, check_id, result, candidate, reviewer, reason, evidence)
+
+    def diagnose_evidence(self) -> dict[str, Any]:
+        from .recovery import diagnose
+        return diagnose(self)
+
+    @writes
+    def plan_evidence_repair(self, reason: str) -> dict[str, Any]:
+        from .recovery import plan_repair
+        return plan_repair(self, reason)
+
+    @writes
+    def apply_evidence_repair(self, plan: str, sha256: str, by: str, utterance: str) -> dict[str, Any]:
+        from .recovery import apply_repair
+        return apply_repair(self, plan, sha256, by, utterance)
+
+    @writes
+    def plan_baseline_revision(self, draft: str) -> dict[str, Any]:
+        from .baselines import plan_revision
+        return plan_revision(self, draft)
+
+    @writes
+    def apply_baseline_revision(self, proposal: str, sha256: str, by: str, utterance: str, reviewer: str, review: str) -> dict[str, Any]:
+        from .baselines import apply_revision
+        return apply_revision(self, proposal, sha256, by, utterance, reviewer, review)
+
+    @writes
+    def recover_baseline_transaction(self, mode: str, by: str, utterance: str, accept_conflicts: bool = False) -> dict[str, Any]:
+        from .baselines import recover_transaction
+        return recover_transaction(self, mode, by, utterance, accept_conflicts)
+
+    @writes
+    def record_test_waiver(self, suite: str, target: str | None, cases: list[str], acceptance: list[str], reason: str, by: str, utterance: str) -> dict[str, Any]:
+        from .test_execution import waive
+        return waive(self, suite, target, cases, acceptance, reason, by, utterance)
 
     @staticmethod
     def _agent_invocations(run_dir: Path) -> list[dict[str, Any]]:
@@ -1315,14 +1557,14 @@ class Gate:
         from .receipts import completed_results, execution_context
         from .locking import observer_lock
         with observer_lock(self.control):
-            matching = completed_results(self._agent_invocations(run_dir), agent_type, digest, state.get("evidence_epoch", 0), bundle_sha256, execution_context(state))
+            matching = completed_results(self._agent_invocations(run_dir), agent_type, digest, state.get("evidence_epoch", 0), bundle_sha256, execution_context(state), selected_runtime(self.root, state))
             for entry in matching:
                 output = self._safe_repo_path(entry["result_path"])
                 if output.is_file() and sha256_bytes(json.dumps(read_json(output), sort_keys=True, ensure_ascii=False).encode("utf-8")) == digest:
                     return
         # Recover native delivery cancelled after Handback, without asking the
         # model to reproduce an already completed analysis. No synthesized hooks.
-        from .runtime import recover
+        from .runtimes import recover
         try:
             recovered = recover(self.root)
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -1330,7 +1572,7 @@ class Gate:
         else:
             if recovered["recovered_events"]:
                 with observer_lock(self.control):
-                    matching = completed_results(self._agent_invocations(run_dir), agent_type, digest, state.get("evidence_epoch", 0), bundle_sha256, execution_context(state))
+                    matching = completed_results(self._agent_invocations(run_dir), agent_type, digest, state.get("evidence_epoch", 0), bundle_sha256, execution_context(state), selected_runtime(self.root, state))
                     for entry in matching:
                         output = self._safe_repo_path(entry["result_path"])
                         if output.is_file() and sha256_bytes(json.dumps(read_json(output), sort_keys=True, ensure_ascii=False).encode("utf-8")) == digest:
@@ -1339,6 +1581,11 @@ class Gate:
 
     def _next_actions(self, state: dict[str, Any], contract: dict[str, Any] | None) -> list[str]:
         if state.get("status") == "needs_human":
+            kind = state.get("blocker", {}).get("kind")
+            if kind == "evidence_integrity":
+                return ["diagnose-evidence; plan-evidence-repair --reason ...; review the concrete plan; apply-evidence-repair only with actual authorization; rerun affected checks"]
+            if kind == "integrity":
+                return ["Restore the original frozen bytes, or prepare baseline-drafts and plan-baseline-revision; review/apply only with actual authorization; collect new Red before Build"]
             if self._can_retry_infrastructure(state):
                 return ["Explain the infrastructure blocker; after explicit user instruction use resume-run --mode retry --by ... --utterance ...; preserve stage and checks, then rerun stale checks if the runtime changed"]
             return ["Explain the blocker; await an explicit user instruction before resume-run or archive"]
@@ -1404,6 +1651,8 @@ class Gate:
             raise GateError("Design requires an approved, unchanged intent.md")
 
     def _check_design_ready(self, state: dict[str, Any], run_dir: Path, contract: dict[str, Any]) -> None:
+        from .recovery import require_healthy
+        require_healthy(self, state, run_dir)
         self.integrity()
         from .checks import require_design_review
         require_design_review(self, state, run_dir, contract)
@@ -1415,7 +1664,10 @@ class Gate:
         if required_tests:
             if set(state.get("frozen_tests", {})) != set(required_tests + contract.get("test_support_files", [])):
                 raise GateError("Freeze all contract.test_files before entering build")
-            red_targets = {item.get("target") for item in state.get("test_runs", []) if item["suite"] == "red" and item["valid_red"]}
+            from .recovery import effective_records, baseline_id
+            red_targets = {item.get("target") for item in effective_records(self, state, run_dir)
+                           if item["suite"] == "red" and item["valid_red"] and
+                           (not state.get("baseline_ref") or item.get("baseline_id") == baseline_id(state))}
             missing_red = sorted(set(contract.get("red_test_files", required_tests)) - red_targets)
             if missing_red:
                 raise GateError("A valid Red result is required for each frozen test: " + ", ".join(missing_red))
@@ -1438,12 +1690,16 @@ class Gate:
                     path = self._safe_repo_path(evidence["path"])
                     if not path.is_file() or sha256_file(path) != evidence.get("sha256"):
                         raise GateError(f"Work item evidence changed after completion: {evidence['path']}")
-        failures = [f"{item['suite']}:{item.get('target') or '*'} ({item['status']})" for item in self._check_statuses(state, contract) if item["status"] != "passed"]
+        failures = [f"{item['suite']}:{item.get('target') or '*'} ({item['status']})" for item in self._check_statuses(state, contract) if not check_acceptable(item, contract)]
         if failures:
             raise GateError("Fresh passing results required for the current candidate: " + ", ".join(failures))
 
     def _check_verifier_passed(self, state: dict[str, Any], run_dir: Path, contract: dict[str, Any]) -> None:
+        from .recovery import require_healthy
+        require_healthy(self, state, run_dir)
         self._check_build_ready(state, contract)
+        if not contract.get("verifier", {}).get("required", True) and any(item["status"] == "passed_with_waivers" for item in self._check_statuses(state, contract)):
+            raise GateError("Exceptional delivery requires an independent Verifier; revise the Contract to require it")
         if contract.get("verifier", {}).get("required", True):
             verdict = run_dir / "verifier-report.json"
             if state.get("status") != "accepted" or not verdict.is_file():
@@ -1489,6 +1745,29 @@ def validate_contract(contract: Any) -> list[str]:
             errors.append(f"missing {key}")
     if contract.get("schema") != "aidevflow/contract-v1":
         errors.append("schema must be aidevflow/contract-v1")
+    policy = contract.get("test_policy", {})
+    if not isinstance(policy, dict) or set(policy) - {"report_format", "required_cases", "allow_approved_waivers"}:
+        errors.append("test_policy must be an object with report_format, required_cases and/or allow_approved_waivers")
+    else:
+        if "report_format" in policy and policy["report_format"] not in ("junit", "summary"):
+            errors.append("test_policy.report_format must be junit or summary")
+        if "allow_approved_waivers" in policy and not isinstance(policy["allow_approved_waivers"], bool):
+            errors.append("test_policy.allow_approved_waivers must be boolean")
+        cases = policy.get("required_cases", {})
+        if not isinstance(cases, dict) or any(not isinstance(key, str) or not isinstance(values, list) or not values or any(not isinstance(value, str) or not value.strip() for value in values) for key, values in cases.items()):
+            errors.append("test_policy.required_cases must map suite[:target] to non-empty case ID arrays")
+        elif cases and not policy.get("report_format"):
+            errors.append("required_cases requires an explicit report_format")
+        if isinstance(cases, dict) and isinstance(contract.get("test_commands"), dict):
+            valid_keys = {name for name in contract["test_commands"] if name != "red"}
+            paths = contract.get("test_files", [])
+            valid_keys.update("green:" + path for path in (paths if isinstance(paths, list) else []) if isinstance(path, str))
+            checks = contract.get("required_checks", [])
+            for check in checks if isinstance(checks, list) else []:
+                if isinstance(check, dict) and isinstance(check.get("suite"), str) and isinstance(check.get("target"), str):
+                    valid_keys.add(check["suite"] + ":" + check["target"])
+            if any(key not in valid_keys for key in cases):
+                errors.append("required_cases keys must name a declared executable check suite[:target]")
     if "work_plan_required" in contract and not isinstance(contract["work_plan_required"], bool):
         errors.append("work_plan_required must be a boolean when provided")
     timeout = contract.get("test_timeout_seconds", 300)
@@ -1846,20 +2125,35 @@ def validate_verdict(verdict: Any, state: dict[str, Any], run_dir: Path, contrac
     bundle_dir = run_dir.parents[2] / Path(*bundle_rel.parts)
     bundle_meta = read_json(bundle_dir / "BUNDLE.json")
     bundled_files = {entry.get("path") for entry in bundle_meta.get("files", [])}
+    from .test_execution import used_waivers
+    waivers = used_waivers(Gate(run_dir.parents[2]), state)
+    waived_ids = {identity for waiver in waivers.values() for identity in waiver["acceptance_items"]}
     for item in items:
         if not isinstance(item, dict):
             continue
         if set(item) != {"id", "verdict", "evidence", "reason"}:
             errors.append(f"verdict item {item.get('id')} contains unexpected or missing properties")
-        if item.get("verdict") not in ("pass", "fail", "blocked"):
+        if item.get("verdict") not in ("pass", "fail", "blocked", "waived"):
             errors.append(f"invalid verdict for {item.get('id')}")
+        if item.get("verdict") == "waived" and (item.get("id") not in waived_ids or contract.get("test_policy", {}).get("allow_approved_waivers") is not True):
+            errors.append(f"no current approved executed waiver for {item.get('id')}")
+        if item.get("verdict") == "pass" and item.get("id") in waived_ids:
+            errors.append(f"item {item.get('id')} has waived tests; report waived with risks instead of pass")
+        if item.get("verdict") == "waived" and not verdict.get("risks"):
+            errors.append("waived acceptance requires explicit residual risks")
         if not isinstance(item.get("reason"), str) or not item["reason"].strip():
             errors.append(f"reason for {item.get('id')} must be a non-empty string")
         evidence = item.get("evidence")
         if not isinstance(evidence, list) or any(not isinstance(path, str) for path in evidence):
             errors.append(f"evidence for {item.get('id')} must be an array of paths")
-        elif item.get("verdict") == "pass" and not evidence:
+            continue
+        elif item.get("verdict") in ("pass", "waived") and not evidence:
             errors.append(f"passing item {item.get('id')} must cite evidence")
+        if item.get("verdict") == "waived":
+            waiver_paths = {entry["path"] for entry in bundle_meta.get("files", []) if entry.get("source_path") in waivers
+                            and item.get("id") in waivers[entry["source_path"]]["acceptance_items"]}
+            if not waiver_paths.intersection(evidence):
+                errors.append(f"waived item {item.get('id')} must cite its bundled waiver")
         for path in evidence or []:
             if path not in bundled_files:
                 errors.append(f"evidence is not in the frozen bundle manifest: {path}")

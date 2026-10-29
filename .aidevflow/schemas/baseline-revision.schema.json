@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Reviewed baseline revision draft",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "reason", "changes"],
+  "properties": {
+    "schema": {"const": "aidevflow/baseline-revision-v1"},
+    "reason": {"type": "string", "minLength": 1},
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "draft"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "draft": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "contract_draft": {"type": "string", "minLength": 1},
+    "work_plan_draft": {"type": "string", "minLength": 1}
+  }
+}

@@ -186,7 +186,7 @@ class GateTests(GateFixture):
         bundle_paths = {item["path"] for item in manifest["files"]}
         self.assertIn("diff.patch", bundle_paths)
         sources = {item.get("source_path") for item in manifest["files"]}
-        self.assertIn(".aidevflow/runs/TEST-1/evidence/001-red.json", sources)
+        self.assertIn(red["evidence_path"], sources)
         self.assertIn(".aidevflow/contract.json", sources)
         verdict = {
             "schema": VERDICT_SCHEMA,
@@ -252,7 +252,7 @@ class GateTests(GateFixture):
         self.gate.advance("verify")
         evidence = self.root / self.gate.status()["test_runs"][0]["evidence_path"]
         evidence.write_text("tampered evidence", encoding="utf-8")
-        with self.assertRaisesRegex(GateError, "Recorded test evidence changed"):
+        with self.assertRaisesRegex(GateError, "Execution evidence is damaged"):
             self.gate.prepare_verifier()
 
 

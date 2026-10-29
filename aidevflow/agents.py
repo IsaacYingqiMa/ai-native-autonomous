@@ -272,6 +272,9 @@ def _reconcile(root: Path, run_dir: Path, events: list[dict[str, Any]]) -> dict[
 
 
 def capture_event(root: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
+    from .runtimes import selected
+    if selected(root) != "claude-code":
+        return None
     from .runtime import remember_session
     remember_session(root, payload)
     return _capture(root, _normalize(payload))
@@ -295,7 +298,7 @@ def _capture(root: Path, event: dict[str, Any] | None, *, from_transcript: bool 
     with observer_lock(root / ".aidevflow"):
         gate = Gate(root)
         state, run_dir, _ = gate._load_active()
-        if state.get("status") in ("needs_human", "archived", "delivery_ready"):
+        if state.get("status") in ("needs_human", "archived", "delivery_ready", "delivery_ready_with_exceptions"):
             return None
         # No subprocess/version probe on the Hook critical path. doctor owns it.
         directory = run_dir / "agent-observations"

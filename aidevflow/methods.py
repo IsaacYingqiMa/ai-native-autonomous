@@ -7,7 +7,8 @@ from typing import Any
 
 
 def skill_path(root: Path, name: str) -> Path:
-    directory = (root / ".claude" / "skills").resolve()
+    from .runtimes import skills_root
+    directory = skills_root(root)
     path = (directory / name / "SKILL.md").resolve()
     path.relative_to(directory)
     return path
@@ -61,8 +62,8 @@ def observe_skill(root: Path, payload: dict[str, Any]) -> None:
     response = payload.get("tool_response")
     if isinstance(response, dict) and (response.get("isError") or response.get("error")):
         return
-    from .managed import enabled, package_manifest
-    package = package_manifest(root, contract) if enabled(contract) else None
+    from .managed import enabled, package_manifest, package_version
+    package = package_manifest(root, contract, version=package_version(root, state)) if enabled(contract) else None
     for phase, names in contract.get("method", {}).get("stages", {}).items():
         expected_stage = "build" if phase == "review" else phase
         if name not in names or state["current_stage"] != expected_stage:
@@ -85,8 +86,8 @@ def observe_skill(root: Path, payload: dict[str, Any]) -> None:
 def method_status(root: Path, run_dir: Path, state: dict[str, Any], contract: dict[str, Any]) -> list[dict[str, Any]]:
     from .gate import read_json, sha256_file
     observed = [read_json(path) for path in (run_dir / "method-observations").glob("*.json")]
-    from .managed import enabled, package_manifest
-    package = package_manifest(root, contract) if enabled(contract) else None
+    from .managed import enabled, package_manifest, package_version
+    package = package_manifest(root, contract, version=package_version(root, state)) if enabled(contract) else None
     result = []
     for phase, names in contract.get("method", {}).get("stages", {}).items():
         for name in names:

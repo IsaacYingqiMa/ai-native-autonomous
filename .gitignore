@@ -6,6 +6,9 @@
 .aidevflow/events.jsonl
 .aidevflow/archive/
 .aidevflow/agent-observer.lock
+.aidevflow/gate-write.lock
+.aidevflow/coordinator.lock
+.aidevflow/runtime-sessions/
 __pycache__/
 *.py[cod]
 .venv/
@@ -17,3 +20,5 @@ test/
 .claude/skills/zsspec-*
 .claude/skills/.skillhub/
 bash.exe.stackdump
+
+.aidevflow/event-log.lock
