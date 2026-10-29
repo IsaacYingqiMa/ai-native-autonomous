@@ -28,7 +28,7 @@ def decide(root: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
     if contract:
         paths += [root / rel for key in ("design_artifacts", "test_files", "test_support_files") for rel in contract.get(key, [])]
     paths += list((root / "specs/aidevflow-intake" / state["task_id"]).glob("*.json"))
-    signature = {"updated_at": state.get("updated_at"), "stage": state["current_stage"], "status": state["status"],
+    signature = {"revision": state.get("revision", 0), "updated_at": state.get("updated_at"), "stage": state["current_stage"], "status": state["status"],
                  "files": {str(p.relative_to(root)): sha256_file(p) for p in paths if p.is_file()}}
     fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
     with observer_lock(gate.control):
@@ -54,6 +54,12 @@ def decide(root: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def set_owner(root: Path, owner: str) -> dict[str, Any]:
+    from .locking import writer_lock
+    with writer_lock(root.resolve() / ".aidevflow"):
+        return _set_owner(root, owner)
+
+
+def _set_owner(root: Path, owner: str) -> dict[str, Any]:
     from .gate import Gate, GateError
     gate = Gate(root)
     state, run_dir, _ = gate._load_active()

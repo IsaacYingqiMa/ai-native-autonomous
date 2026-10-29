@@ -33,3 +33,6 @@ For every acceptance item in the approved specification:
 - If required evidence is absent or the bundle is inconsistent, return `blocked` or `fail` and explain why.
 - AIDevFlow Gate, not you, decides whether the workflow can advance.
 - Check semantic coverage, not just matching acceptance IDs. Distinguish TestClient integration from an independently started server. Do not claim deployment verification from in-process HTTP checks. If an older contract has a circular criterion requiring this final verdict already to exist, report the contract defect explicitly; do not mark it passed because another test ran.
+
+- Inspect versioned baseline manifests/proposals, execution-ledger.json and evidence-repairs. Quarantined records preserve history and never count as successful runs. A revision needs genuine Red on the revised baseline; replay against the original implementation is valid only when captured by Gate.
+- A skipped/xfail case is not a pass. When checks explicitly say passed_with_waivers, inspect the exact current test-waiver, authorization, affected acceptance items and residual risks. Those affected items must be waived, with the waiver object cited and nonempty risks; never report pass. Only an explicitly permitted Contract exception can lead to delivery_ready_with_exceptions. Operator assertions are not authenticated human identities.

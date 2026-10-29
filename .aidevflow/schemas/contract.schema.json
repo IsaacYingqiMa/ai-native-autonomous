@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema",
+    "task_id",
+    "title",
+    "code_paths",
+    "design_artifacts",
+    "test_files",
+    "test_commands",
+    "acceptance_items",
+    "routing",
+    "verifier",
+    "work_plan_required",
+    "required_checks"
+  ],
+  "properties": {
+    "schema": {
+      "const": "aidevflow/contract-v1"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "max_repair_attempts": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "test_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "work_plan_required": {
+      "const": true
+    },
+    "code_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "design_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "test_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "test_support_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "red_test_files": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "test_commands": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "acceptance_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "criterion"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "criterion": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "required_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "acceptance_items"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "command",
+              "static",
+              "manual"
+            ]
+          },
+          "suite": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "acceptance_items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "method": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "const": "zsspec"
+        },
+        "profile": {
+          "const": "zsspec-managed-v1"
+        },
+        "stages": {
+          "type": "object",
+          "properties": {
+            "design": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "build": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "review": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "verifier": {
+      "type": "object",
+      "properties": {
+        "required": {
+          "const": true
+        },
+        "input_policy": {
+          "const": "bundle-only"
+        },
+        "required_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "test_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "report_format": {
+          "enum": [
+            "junit",
+            "summary"
+          ]
+        },
+        "required_cases": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "allow_approved_waivers": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

@@ -3,15 +3,56 @@ from __future__ import annotations
 
 import os
 import time
+import threading
+from functools import wraps
 from contextlib import contextmanager
 from pathlib import Path
 
+_mutexes: dict[str, threading.RLock] = {}
+_registry_lock = threading.Lock()
+_held = threading.local()
+
 
 @contextmanager
-def observer_lock(control: Path, timeout: float = 5.0):
+def writer_lock(control: Path, timeout: float = 5.0):
+    """Reentrant within one thread; exclusive across threads and processes."""
+    key = str(control.resolve()).casefold() if os.name == "nt" else str(control.resolve())
+    with _registry_lock:
+        mutex = _mutexes.setdefault(key, threading.RLock())
+    if not mutex.acquire(timeout=timeout):
+        raise TimeoutError("Another Gate writer is active; retry after it finishes")
+    held = getattr(_held, "paths", None)
+    if held is None:
+        held = _held.paths = set()
+    try:
+        if key in held:
+            yield
+        else:
+            with observer_lock(control, timeout=timeout, name="gate-write.lock"):
+                held.add(key)
+                try:
+                    yield
+                finally:
+                    held.remove(key)
+    finally:
+        mutex.release()
+
+
+def writes(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with writer_lock(self.control):
+            return method(self, *args, **kwargs)
+    return locked
+
+
+@contextmanager
+def observer_lock(control: Path, timeout: float = 5.0, *, name: str = "agent-observer.lock"):
     control.mkdir(parents=True, exist_ok=True)
     # Never unlink this file: that would allow two different lock objects.
-    with (control / "agent-observer.lock").open("a+b") as stream:
+    if name not in ("agent-observer.lock", "gate-write.lock", "coordinator.lock", "event-log.lock"):
+        raise ValueError("Unknown AIDevFlow lock name")
+    with (control / name).open("a+b") as stream:
         stream.seek(0, os.SEEK_END)
         if stream.tell() == 0:
             stream.write(b"\0")

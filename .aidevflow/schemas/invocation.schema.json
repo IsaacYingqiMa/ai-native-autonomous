@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AIDevFlow native invocation v3",
+  "type": "object",
+  "required": ["id", "receipt_schema", "runtime", "task_id", "role", "context", "input_digest", "dispatch_observed", "execution_finished", "status"],
+  "properties": {
+    "receipt_schema": {"const": "aidevflow/invocation-v3"},
+    "runtime": {"enum": ["omp", "claude-code"]},
+    "role": {"enum": ["intent_analyst", "contract_planner", "verifier"]},
+    "status": {"enum": ["dispatched", "started", "completed", "execution_failed", "invalid_output", "identity_conflict", "stale"]},
+    "dispatch_observed": {"type": "boolean"},
+    "execution_finished": {"type": "boolean"},
+    "context": {"type": "object"},
+    "input_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  },
+  "additionalProperties": true
+}

@@ -22,23 +22,33 @@ def file_hash(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
 
 
-def package_manifest(root: Path, contract: dict[str, Any]) -> dict[str, Any]:
+def package_version(root: Path, state: dict[str, Any]) -> int:
+    from .gate import Gate, read_json
+    ref = state.get("method_policy")
+    return read_json(Gate(root)._safe_repo_path(ref["path"]))["package"].get("manifest_version", 1) if ref else 2
+
+
+def package_manifest(root: Path, contract: dict[str, Any], *, version: int = 2) -> dict[str, Any]:
     """Fingerprint actual method instructions, references and templates, not telemetry."""
-    base = (root / ".claude/skills").resolve()
+    from .runtimes import skills_root
+    base = skills_root(root)
     names = {name for values in contract.get("method", {}).get("stages", {}).values() for name in values}
     names.update(("zsspec-standard", "zsspec-change"))
-    files: dict[str, str | None] = {}
+    files: dict[str, str | None] = {"README.md": file_hash(base / "README.md")} if version >= 2 else {}
+    suffixes = {".md", ".json", ".yml", ".yaml"}
+    if version >= 2:
+        suffixes.update((".py", ".js", ".ts", ".sh", ".ps1", ".txt", ".toml"))
     for name in sorted(names):
         directory = base / name
         # SKILL.md is always present in the manifest, even if missing on disk.
         files[f"{name}/SKILL.md"] = file_hash(directory / "SKILL.md")
         if directory.is_dir():
             for path in sorted(directory.rglob("*")):
-                if path.is_file() and path.suffix.lower() in (".md", ".json", ".yml", ".yaml"):
+                if path.is_file() and path.suffix.lower() in suffixes and "__pycache__" not in path.parts:
                     path.resolve().relative_to(base)
                     files[path.relative_to(base).as_posix()] = file_hash(path)
     digest = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
-    return {"sha256": digest, "files": files}
+    return {"sha256": digest, "files": files, **({"manifest_version": version} if version >= 2 else {})}
 
 
 def read_policy(root: Path) -> dict[str, Any]:
@@ -77,8 +87,10 @@ def read_policy(root: Path) -> dict[str, Any]:
             elif not re.fullmatch(r"[A-Za-z0-9_./\\:-]+", value):
                 raise GateError(f"Unsupported zsspec.yml scalar on line {number}")
             values[section][key] = value
-    if values["paths"]["skills_root"].replace("\\", "/").rstrip("/") not in ("auto", ".claude/skills", "./.claude/skills"):
-        raise GateError("Managed v1 requires project-local .claude/skills; global/CodeBuddy/custom skill roots are not yet supported")
+    from .runtimes import skills_root
+    effective_root = skills_root(root).relative_to(root.resolve()).as_posix()
+    if values["paths"]["skills_root"].replace("\\", "/").removeprefix("./").rstrip("/") not in ("auto", effective_root):
+        raise GateError("Managed method root must match the pinned project-local skills_root")
     if values["gate"]["mode"] != "strict":
         raise GateError("Managed v1 requires gate.mode=strict; quick cannot weaken the pinned acceptance contract")
     for key in ("e2e", "manual"):
@@ -88,7 +100,7 @@ def read_policy(root: Path) -> dict[str, Any]:
         raise GateError("Invalid zsspec.yml parallel configuration")
     return {"schema": "aidevflow/method-policy-v1", "profile": PROFILE,
             "config_path": "specs/zsspec.yml", "config_sha256": file_hash(path), "configured": values,
-            "effective": {"skills_root": ".claude/skills", "gate": "strict", "parallel": "off",
+            "effective": {"skills_root": effective_root, "gate": "strict", "parallel": "off",
                           "review": "ai_coordinator", "tests": "design_frozen", **values["test"]}}
 
 
@@ -135,6 +147,9 @@ def validation_errors(contract: dict[str, Any]) -> list[str]:
     if any(not isinstance(contract.get(key, []), list) for key in ("code_paths", "test_files", "test_support_files", "design_artifacts", "required_checks")):
         return errors + ["Managed paths and checks must be arrays"]
     from .gate import _glob_match
+    if (any("specs/zsspec.yml" in contract.get(key, []) for key in ("design_artifacts", "test_files", "test_support_files"))
+            or any(_glob_match("specs/zsspec.yml", pattern) for pattern in contract.get("code_paths", []))):
+        errors.append("Pinned method configuration is a project setup input, not a generated task artifact")
     for prefix in prefixes:
         if any(_glob_match(prefix, pattern) or _glob_match(prefix + "/artifact.json", pattern)
                or pattern.startswith(prefix + "/") for pattern in contract.get("code_paths", [])):

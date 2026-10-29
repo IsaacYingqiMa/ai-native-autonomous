@@ -101,6 +101,8 @@ def projected_documents(root: Path, plan: dict[str, Any], state: dict[str, Any],
         elif kind == "check":
             value = checks.get(source, "待执行")
         else:
-            value = "已完成" if state.get("status") in ("accepted", "delivery_ready") or state.get("current_stage") == "delivery_ready" else "进行中"
+            value = "已完成" if state.get("status") in ("accepted", "delivery_ready", "delivery_ready_with_exceptions") or state.get("current_stage") == "delivery_ready" else "进行中"
+            if value == "已完成" and source in state.get("waived_acceptance_items", []):
+                value = "有批准例外"
         documents[path] = replace_status(text, binding["row_id"], value)
     return documents
