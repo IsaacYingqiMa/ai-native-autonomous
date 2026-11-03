@@ -22,3 +22,6 @@ test/
 bash.exe.stackdump
 
 .aidevflow/event-log.lock
+.aidevflow/discoveries/
+.aidevflow/active-discovery.json
+.aidevflow/discovery-handoff.json

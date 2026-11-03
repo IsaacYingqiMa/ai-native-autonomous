@@ -104,6 +104,9 @@ def plan_revision(gate, draft_path: str) -> dict:
     if any(new_contract.get(key) != contract.get(key) for key in set(new_contract) | set(contract) if key not in mutable):
         raise GateError("Baseline revision cannot change task identity, product scope, method/runtime or repair budgets")
     errors = validate_contract(new_contract) + gate._validate_available_method_skills(new_contract)
+    if state.get("requirements_ref"):
+        from .discovery import check_contract
+        check_contract(gate.root, state["requirements_ref"], new_contract)
     if errors:
         raise GateError("Invalid revised Contract: " + "; ".join(errors))
     plan = read_json(draft_file(gate, state, draft["work_plan_draft"])) if draft.get("work_plan_draft") else gate._plan(state)

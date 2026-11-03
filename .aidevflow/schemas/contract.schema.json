@@ -220,6 +220,34 @@
           "type": "boolean"
         }
       }
+    },
+    "requirements_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "approval_path",
+        "approval_sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approval_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approval_sha256": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
     }
   }
 }

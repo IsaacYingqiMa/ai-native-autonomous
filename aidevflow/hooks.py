@@ -77,6 +77,8 @@ def guard(payload: dict[str, Any], root: Path) -> int:
         if any(rel == prefix.rstrip("/") or rel.startswith(prefix) for prefix in protected_prefixes(root)):
             return _block(f"AIDevFlow protects {rel}; change it through the AIDevFlow maintainer workflow.", root, rel, "protected-path", payload)
     active_path = root / ".aidevflow" / "active-run.json"
+    if (root / ".aidevflow/active-discovery.json").exists() or (root / ".aidevflow/discovery-handoff.json").exists():
+        return _block("Requirements discovery is read-only; persist drafts through discovery-record and obtain human approval before delivery.", root, "", "discovery-read-only", payload)
     if not active_path.is_file():
         return 0
     try:
@@ -137,8 +139,19 @@ def guard_bash(payload: dict[str, Any], root: Path, command: str) -> int:
     scanned = re.sub(r"(?:\d|\*)?>&(?:\d|-)\b", "", normalized)
     scanned = re.sub(r"(?:\d|\*)?>>?\s*(?:/dev/null|\$null|nul)(?=\s|$|[|;&])", "", scanned)
     supported_gate_call = scanned.startswith(("python scripts/aidevflow.py ", "python3 scripts/aidevflow.py ", "py scripts/aidevflow.py "))
+    if "discovery-approve" in scanned:
+        return _block("Requirements approval is a human action: use the native /aidevflow-approve command or an operator terminal.", root, "", "human-requirements-approval", payload)
+    if supported_gate_call:
+        # Only a literal first subcommand is supported. Shell quote concatenation or
+        # root-option indirection must not disguise the human-only approval verb.
+        parts = scanned.split()
+        verb = parts[2] if len(parts) > 2 else ""
+        if not re.fullmatch(r"(?:--help|[a-z][a-z0-9-]*)", verb):
+            return _block("Use a literal Gate subcommand in the current project; quoted commands and root-option indirection are not supported by agent shell.", root, "", "unsupported-gate-command", payload)
     if supported_gate_call and not any(token in scanned for token in ("&", ";", "|", ">", "`", "$(", "\n", "\r")):
         return 0
+    if (root / ".aidevflow/active-discovery.json").exists() or (root / ".aidevflow/discovery-handoff.json").exists():
+        return _block("During discovery use read/grep/glob or supported AIDevFlow commands; arbitrary shell execution is disabled.", root, "", "discovery-shell", payload)
     redirect_targets = [match.group(1).strip("\"'") for match in re.finditer(r">{1,2}\s*([^\s|;&]+)", scanned)]
     write_markers = ("set-content", "out-file", "add-content", "remove-item", "copy-item", "move-item", "tee-object", "sed -i", "git checkout", "git restore", "git reset --hard", ".write_text(", ".write_bytes(", "writefile", "unlink(")
     has_mutation = any(marker in scanned for marker in write_markers)

@@ -4,6 +4,8 @@ AIDevFlow 是面向 AI 自主研发交付的本地控制套件。用户提供需
 
 **新安装默认使用 omp（oh-my-pi）**。Claude Code 保留独立适配；运行 omp 不要求安装 Claude Code。方法包支持项目级 `.omp/skills` 和 `.claude/skills`，保留供应方原文。
 
+首次使用、需要人工确认需求后再自主开发，请按 [AI 自主套件完整使用教程](AI-AUTONOMY-GUIDE.md) 操作。教程统一使用 `reviewed-discovery-v1`，包含环境准备、方法包、确认、暂停恢复与交付检查。
+
 ```text
 需求 → Intent → Design → Build → Verify → delivery_ready
                               ↑         │
@@ -30,12 +32,16 @@ omp --version
 
 ## 安装到业务项目
 
+需要先讨论并由人确认 Intent/PRD、再进入自主交付时，使用 omp 的显式配置 `--workflow-profile reviewed-discovery-v1`。完整操作、批准边界与兼容说明见 [需求确认流程](REVIEWED-DISCOVERY.md)。省略此参数保留已有流程；不会自动迁移活动任务。
+
+启用后使用 `/aidevflow-flow <自然语言需求或需求文档路径>` 作为统一入口：讨论完善后自动展示人工审查，确认即进入自主开发，修改则继续讨论，暂停后仍从同一入口续跑。原生确认与文件摘要由系统处理，用户无需手动复制版本参数。
+
 框架源码与业务项目必须分开。取得完整源码，不能只复制 Python 包。
 
 ```powershell
 $AidevflowSource = 'D:\Tools\ai-native-autonomous'
 $AidevflowProject = 'D:\Work\my-project'
-python -B "$AidevflowSource\scripts\aidevflow.py" --root "$AidevflowProject" install --runtime omp --skills-root .omp/skills
+python -B "$AidevflowSource\scripts\aidevflow.py" --root "$AidevflowProject" install --runtime omp --skills-root .omp/skills --workflow-profile reviewed-discovery-v1
 ```
 
 已有项目保留现有工作，不重新初始化。新空项目先按团队规范建立初始提交。安装器不创建业务任务、不安装业务依赖、不配置 Git 身份、不修改全局 omp 配置，也不覆盖项目 `.omp/config.yml`。
@@ -107,7 +113,7 @@ Design 生成并冻结测试、收集有效 Red；Build 修改实现，运行真
 不要提交、合并、部署、修改框架或清除历史。
 ```
 
-也可使用 `/skill:aidevflow-flow` 后发送需求；不要重复启动相同任务。协调者生成 Intent、Contract 和 Work Plan，用户不手写 JSON。
+启用需求确认流程时始终使用 `/aidevflow-flow`，由扩展创建讨论和人工确认交互。`/skill:aidevflow-flow` 仅加载方法说明，不能代替这个原生入口；旧流程仍可按其原有方式使用。不要重复启动相同任务。协调者生成 Intent、Contract 和 Work Plan，用户不手写 JSON。
 
 关键角色原生 task 调用一次一个；schema 要求时使用单元素 tasks 数组。安装定义默认 blocking、只读、结构化输出；不要覆盖角色工具、输出 schema 或隔离模式。后台 launch 不能计为完成。Verifier 只能读取当前固定 bundle。
 

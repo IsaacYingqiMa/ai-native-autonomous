@@ -157,6 +157,10 @@ class Gate:
         return commit.stdout.strip()
 
     def _load_active(self) -> tuple[dict[str, Any], Path, dict[str, Any] | None]:
+        if (self.control / "discovery-handoff.json").exists():
+            raise GateError("Interrupted discovery handoff; run discovery-start-delivery to recover")
+        if (self.control / "active-discovery.json").exists():
+            raise GateError("Requirements discovery is active; delivery cannot run concurrently")
         if not self.active_path.exists():
             raise GateError("No active AIDevFlow run. Start one with `aidevflow start-intake --request <path>`.")
         active = read_json(self.active_path)
@@ -172,6 +176,11 @@ class Gate:
         state.setdefault("work_plan", None)
         state.setdefault("work_items", [])
         state.setdefault("revision", 0)
+        if state.get("workflow_profile") == "reviewed-discovery-v1":
+            from .discovery import verify_reference
+            if not state.get("requirements_ref"):
+                raise GateError("Reviewed delivery has no approved requirements binding")
+            verify_reference(self.root, state["requirements_ref"])
         binding_ref = state.get("execution_binding_ref")
         if "execution_binding" in state or binding_ref is not None:
             if (not isinstance(state.get("execution_binding"), dict) or not isinstance(binding_ref, dict)
@@ -189,6 +198,9 @@ class Gate:
             raise GateError("Active run-state contract_path is invalid")
         contract_path = self._safe_repo_path(state["contract_path"])
         contract = read_json(contract_path)
+        if state.get("requirements_ref"):
+            from .discovery import check_contract
+            check_contract(self.root, state["requirements_ref"], contract)
         if state.get("contract_sha256") != sha256_file(contract_path):
             raise GateError("AIDevFlow contract changed during this run; stop and escalate for human review")
         from .managed import enabled
@@ -249,6 +261,12 @@ class Gate:
     @writes
     def start_intake(self, request_path: str) -> dict[str, Any]:
         """Start a durable, contract-free intake from a natural-language request file."""
+        from .discovery import reviewed
+        if reviewed(self.root) or (self.control / "active-discovery.json").exists() or (self.control / "discovery-handoff.json").exists():
+            raise GateError("Use discovery-create and approve Intent/PRD before discovery-start-delivery")
+        return self._create_intake(request_path)
+
+    def _create_intake(self, request_path: str, assigned_id: str | None = None, requirements_ref: dict | None = None) -> dict[str, Any]:
         base_commit = self._assert_git_root()
         if self.active_path.exists():
             active = read_json(self.active_path)
@@ -263,11 +281,16 @@ class Gate:
             raise GateError("Request document must be UTF-8 text") from exc
         if not request_text.strip():
             raise GateError("Request document is empty")
-        task_id = f"ADF-{dt.datetime.now(dt.timezone.utc):%Y%m%d%H%M%S}-{secrets.token_hex(3)}"
+        task_id = assigned_id or f"ADF-{dt.datetime.now(dt.timezone.utc):%Y%m%d%H%M%S}-{secrets.token_hex(3)}"
         run_dir = self.runs / task_id
         if run_dir.exists():
-            raise GateError(f"Generated task id already exists: {task_id}; retry intake")
-        run_dir.mkdir(parents=True)
+            transaction = self.control / "discovery-handoff.json"
+            if not (requirements_ref and assigned_id and transaction.is_file()
+                    and read_json(transaction).get("task_id") == assigned_id
+                    and read_json(transaction).get("requirements_ref") == requirements_ref
+                    and not (run_dir / "run-state.json").exists()):
+                raise GateError(f"Generated task id already exists: {task_id}; retry intake")
+        run_dir.mkdir(parents=True, exist_ok=True)
         source_copy = run_dir / "source-request.md"
         source_copy.write_bytes(request_bytes)
         title = request_abs.stem[:120] or task_id
@@ -304,6 +327,15 @@ class Gate:
             "created_at": utc_now(),
             "updated_at": utc_now(),
         }
+        if requirements_ref:
+            from .discovery import verify_reference, PROFILE
+            manifest = verify_reference(self.root, requirements_ref)
+            state.update(workflow_profile=PROFILE, requirements_ref=requirements_ref,
+                         autonomy_policy="reviewed_requirements", status="intent_approved")
+            intent = self._safe_repo_path(manifest["intent_path"])
+            state.update(intent_path=manifest["intent_path"], intent_sha256=sha256_file(intent))
+            state["approvals"] = [{"artifact": state["intent_path"], "sha256": state["intent_sha256"],
+                                   "requirements_approval": requirements_ref["approval_path"]}]
         binding_path = run_dir / "execution-binding.json"
         write_json_atomic(binding_path, state["execution_binding"])
         state["execution_binding_ref"] = {"path": binding_path.relative_to(self.root).as_posix(), "sha256": sha256_file(binding_path)}
@@ -328,6 +360,9 @@ class Gate:
         errors.extend(self._validate_available_method_skills(contract))
         if errors:
             raise GateError("Invalid contract: " + "; ".join(errors))
+        if state.get("requirements_ref"):
+            from .discovery import check_contract
+            check_contract(self.root, state["requirements_ref"], contract)
         if state.get("reliability_version", 1) >= 2:
             if contract.get("work_plan_required") is not True:
                 errors.append("new autonomous runs require work_plan_required=true")
@@ -388,6 +423,9 @@ class Gate:
 
     @writes
     def init(self, task_id: str, contract_path: str) -> dict[str, Any]:
+        from .discovery import reviewed
+        if reviewed(self.root) or (self.control / "active-discovery.json").exists() or (self.control / "discovery-handoff.json").exists():
+            raise GateError("Reviewed projects require Discovery approval; init cannot bypass it")
         task_id = safe_id(task_id)
         base_commit = self._assert_git_root()
         contract_abs = (self.root / contract_path).resolve()
@@ -515,6 +553,8 @@ class Gate:
 
     @writes
     def rebuild(self, task_id: str) -> dict[str, Any]:
+        if (self.control / "active-discovery.json").exists() or (self.control / "discovery-handoff.json").exists():
+            raise GateError("Cannot rebuild a delivery while discovery or its handoff is active")
         task_id = safe_id(task_id)
         if (self.runs / task_id / "baseline-transaction.json").is_file():
             raise GateError("Interrupted baseline transaction; use recover-baseline-transaction before rebuild")
@@ -545,6 +585,8 @@ class Gate:
     @writes
     def record_intent(self, draft_path: str) -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
+        if state.get("requirements_ref"):
+            raise GateError("Reviewed Intent is immutable; propose a requirements revision instead")
         self._require_stage(state, "intent")
         draft_abs = self._safe_repo_path(draft_path)
         if not draft_abs.is_file():
@@ -614,6 +656,8 @@ class Gate:
     @writes
     def finalize_intent(self) -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
+        if state.get("requirements_ref"):
+            raise GateError("Reviewed Intent cannot be re-finalized")
         self._require_stage(state, "intent")
         if not state.get("intent_draft_path"):
             raise GateError("Record a valid IntentDraft before finalizing intent.md")
@@ -1114,6 +1158,12 @@ class Gate:
         bundle_dir = writer.directory
         files: list[Path] = []
         files.append(self._safe_repo_path(state["contract_path"]))
+        if state.get("requirements_ref"):
+            from .discovery import verify_reference
+            ref = state["requirements_ref"]
+            manifest = verify_reference(self.root, ref)
+            files.extend(self._safe_repo_path(rel) for rel in manifest["files"])
+            files.extend(self._safe_repo_path(ref[key]) for key in ("path", "approval_path"))
         from .checks import intact
         for reference in (state.get("method_policy"), state.get("design_review")):
             if reference:
