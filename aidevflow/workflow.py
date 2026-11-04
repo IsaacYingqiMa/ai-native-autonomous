@@ -23,10 +23,12 @@ class Workflow:
         return {"action": "discuss", "state": state}
 
     @writes
-    def enter(self, text: str = "", discussion_only: bool = False):
+    def enter(self, text: str = "", discussion_only: bool = False, approved_action: str = ""):
         """Called only by an explicit native user command, never by session restart."""
         if not reviewed(self.root):
             return {"action": "legacy"}
+        if approved_action not in ("", "continue", "revise"):
+            raise GateError("Unknown approved requirements action")
         if self.discovery.transaction.exists():
             if discussion_only:
                 return {"action": "delivery_active", "status": "handoff_pending"}
@@ -57,7 +59,12 @@ class Workflow:
         if state["status"] == "paused":
             state["status"] = state.pop("resume_status", "collecting")
             self.discovery._save(state, directory, "human_resumed")
-        if text.strip() and text.strip().lower() not in ("继续", "resume", "continue", "开始", "开始开发", "继续执行", "确认开始"):
+        has_feedback = text.strip() and text.strip().lower() not in ("继续", "resume", "continue", "开始", "开始开发", "继续执行", "确认开始")
+        if state["status"] == "approved" and not discussion_only and has_feedback and not approved_action:
+            # Text may be an execution instruction or a requirements amendment.
+            # Preserve the approval until an actual native user choice resolves it.
+            return {"action": "choose_approved_action", "discovery_id": state["task_id"]}
+        if has_feedback and (state["status"] != "approved" or discussion_only or approved_action == "revise"):
             self._feedback(state, directory, text)
         if state["status"] == "approved":
             if discussion_only:
@@ -65,7 +72,7 @@ class Workflow:
             if state.get("delivery_authorized") is False:
                 state["delivery_authorized"] = True
                 self.discovery._save(state, directory, "human_authorized_delivery")
-            return {"action": "deliver", **self.discovery.start_delivery()}
+            return {"action": "deliver", **self.discovery.start_delivery(), "user_text": text}
         # /flow is the explicit full-workflow entry; /discover remains discussion-only.
         if state.get("discussion_only", False) != discussion_only:
             state["discussion_only"] = discussion_only

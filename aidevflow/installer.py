@@ -8,6 +8,12 @@ from typing import Any
 from .gate import GateError, sha256_file, write_json_atomic
 
 
+def contract_example(source: Path, method_root: Path) -> Path:
+    """New installs prefer v2; a physically old package keeps its explicit example."""
+    legacy = (method_root / "zsspec-des/SKILL.md").is_file() and not (method_root / "zsspec-plan/SKILL.md").is_file()
+    return source / ".aidevflow" / ("contract.legacy.example.json" if legacy else "contract.example.json")
+
+
 def install(source_root: Path, target_root: Path, runtime: str = "claude-code", *, skills_root: str | None = None, workflow_profile: str | None = None) -> dict[str, Any]:
     if runtime == "omp":
         return install_omp(source_root, target_root, skills_root=skills_root, workflow_profile=workflow_profile)
@@ -49,7 +55,8 @@ def install(source_root: Path, target_root: Path, runtime: str = "claude-code", 
     copies = [
         (source / "aidevflow", target / ".aidevflow" / "runtime" / "aidevflow"),
         (source / ".aidevflow" / "schemas", target / ".aidevflow" / "schemas"),
-        (source / ".aidevflow" / "contract.example.json", target / ".aidevflow" / "contract.example.json"),
+        (contract_example(source, target / config["skills_root"]), target / ".aidevflow" / "contract.example.json"),
+        (source / ".aidevflow/contract.legacy.example.json", target / ".aidevflow/contract.legacy.example.json"),
         (source / ".aidevflow" / "work-plan.example.json", target / ".aidevflow" / "work-plan.example.json"),
         (source / ".claude" / "agents" / "aidevflow-intent-analyst.md", target / ".claude" / "agents" / "aidevflow-intent-analyst.md"),
         (source / ".claude" / "agents" / "aidevflow-contract-planner.md", target / ".claude" / "agents" / "aidevflow-contract-planner.md"),
@@ -105,6 +112,8 @@ def install(source_root: Path, target_root: Path, runtime: str = "claude-code", 
     ignore_block = (
         "# AIDevFlow local run data (keep generated state and user answers out of Git)\n"
         ".aidevflow/runs/\n"
+        ".aidevflow/method-cache/\n"
+        ".aidevflow/method-operation.lock\n"
         ".aidevflow/bundles/\n"
         ".aidevflow/maintenance/\n"
         ".aidevflow/active-run.json\n"
@@ -190,8 +199,9 @@ def install_omp(source_root: Path, target_root: Path, *, skills_root: str | None
     copies = [(source / "aidevflow", target / ".aidevflow/runtime/aidevflow"),
               (source / ".aidevflow/schemas", target / ".aidevflow/schemas"),
               (source / "integrations/omp", target / ".omp/extensions/aidevflow")]
-    for name in ("contract.example.json", "work-plan.example.json"):
+    for name in ("contract.legacy.example.json", "work-plan.example.json"):
         copies.append((source / ".aidevflow" / name, target / ".aidevflow" / name))
+    copies.append((contract_example(source, method_root), target / ".aidevflow/contract.example.json"))
     roles = ("intent-analyst", "contract-planner", "independent-verifier", "requirements-analyst")
     required = [p for p, _ in copies] + [source / f".claude/agents/aidevflow-{role}.md" for role in roles]
     required += [source / ".claude/skills/aidevflow-flow/SKILL.md",
@@ -330,7 +340,7 @@ See references/omp-capabilities.md for the plan format and actual argv.
             "sys.path.insert(0, str(root / '.aidevflow/runtime'))\n"
             f"from aidevflow.{module} import {'serve' if module == 'bridge' else 'main'}\nraise SystemExit({tail})\n")
     put(target / ".aidevflow/project.json", json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-    ignores = [".aidevflow/discoveries/", ".aidevflow/active-discovery.json", ".aidevflow/discovery-handoff.json",
+    ignores = [".aidevflow/method-operation.lock", ".aidevflow/method-cache/", ".aidevflow/discoveries/", ".aidevflow/active-discovery.json", ".aidevflow/discovery-handoff.json",
                ".aidevflow/runs/", ".aidevflow/bundles/", ".aidevflow/maintenance/", ".aidevflow/active-run.json",
                ".aidevflow/events.jsonl", ".aidevflow/archive/", ".aidevflow/agent-observer.lock", ".aidevflow/runtime-sessions/",
                ".aidevflow/gate-write.lock", ".aidevflow/coordinator.lock", ".aidevflow/event-log.lock",

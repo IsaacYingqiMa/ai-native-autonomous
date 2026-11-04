@@ -67,7 +67,7 @@ def main() -> int:
                     process.stdin.flush()
                 if frame.get("id") == "aidevflow-probe":
                     commands = {command.get("name") for command in frame.get("data", {}).get("commands", [])}
-                    discovered = frame.get("success") is True and {"aidevflow-flow", "aidevflow-doctor", "aidevflow-discover", "aidevflow-approve", "skill:aidevflow-flow"} <= commands
+                    discovered = frame.get("success") is True and {"aidevflow-flow", "aidevflow-doctor", "aidevflow-discover", "aidevflow-approve", "aidevflow-accept", "skill:aidevflow-flow"} <= commands
                     break
             process.stdin.close()
             try:

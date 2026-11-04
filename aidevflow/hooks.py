@@ -139,8 +139,16 @@ def guard_bash(payload: dict[str, Any], root: Path, command: str) -> int:
     scanned = re.sub(r"(?:\d|\*)?>&(?:\d|-)\b", "", normalized)
     scanned = re.sub(r"(?:\d|\*)?>>?\s*(?:/dev/null|\$null|nul)(?=\s|$|[|;&])", "", scanned)
     supported_gate_call = scanned.startswith(("python scripts/aidevflow.py ", "python3 scripts/aidevflow.py ", "py scripts/aidevflow.py "))
-    if "discovery-approve" in scanned:
-        return _block("Requirements approval is a human action: use the native /aidevflow-approve command or an operator terminal.", root, "", "human-requirements-approval", payload)
+    if "discovery-approve" in scanned or "method-accept" in scanned:
+        return _block("Approval is a human action: use the native /aidevflow-approve or /aidevflow-accept command, or an operator terminal.", root, "", "human-requirements-approval", payload)
+    if "zsspec_check.py" in scanned and (root / ".aidevflow/active-run.json").exists():
+        from .method_registry import adapter_for
+        try:
+            _, _, contract = Gate(root)._load_active()
+            if adapter_for(contract):
+                return _block("Use method-run or sync-projections; native state scripts cannot mutate live specs directly.", root, "", "native-method-writer", payload)
+        except GateError as exc:
+            return _block(str(exc), root, "", "method-operation-pending", payload)
     if supported_gate_call:
         # Only a literal first subcommand is supported. Shell quote concatenation or
         # root-option indirection must not disguise the human-only approval verb.

@@ -8,7 +8,8 @@ const reads = new Set(["read", "grep", "glob", "web_search", "ask", "todo", "wai
 const criticalInput = (input: any): boolean => roles.has(String(input?.agent)) ||
   (Array.isArray(input?.tasks) && input.tasks.some((item: any) => roles.has(item?.agent)));
 const methodRead = (input: any): boolean => typeof input?.path === "string" &&
-  /(?:^|\/)zsspec-[a-z0-9-]+(?:\/|:\d|$)/.test(input.path.replaceAll("\\", "/"));
+  (/(?:^|\/)zsspec-[a-z0-9-]+(?:\/|:\d|$)/.test(input.path.replaceAll("\\", "/")) ||
+   /(?:^|\/)README\.md(?::\d+(?:-\d+)?)?$/.test(input.path.replaceAll("\\", "/")));
 
 export default function aidevflow(pi: ExtensionAPI): void {
   // Factories are rebound for children; keep all mutable state in this closure.
@@ -166,6 +167,12 @@ export default function aidevflow(pi: ExtensionAPI): void {
       }
       let route = await client(ctx).request("flow-enter", { text: args || "", discussion_only: discussionOnly, actor: ctx.agent });
       if (epoch !== sessionEpoch) return;
+      if (route.action === "choose_approved_action") {
+        if (!ctx.hasUI) { announce("需求已批准。直接运行 /aidevflow-flow 继续开发；修改需求请使用 /aidevflow-discover 加上修改意见。"); return; }
+        const choice = await ctx.ui.select("需求已批准，这段文字用于哪一步？", ["按已批准需求继续开发", "修改需求并重新审阅"]);
+        if (epoch !== sessionEpoch || !choice) return;
+        route = await client(ctx).request("flow-enter", { text: args || "", approved_action: choice === "按已批准需求继续开发" ? "continue" : "revise", actor: ctx.agent });
+      }
       if (route.action === "review") route = await reviewCheckpoint(ctx);
       if (epoch !== sessionEpoch) return;
       if (route.replayed) { announce("这次确认已经处理；当前任务已保留。"); return; }
@@ -200,6 +207,15 @@ export default function aidevflow(pi: ExtensionAPI): void {
   pi.registerCommand("aidevflow-doctor", {
     description: "Inspect Gate setup and this OMP session's actual tools without starting a task",
     handler: async (_args, ctx) => showPreflight(await client(ctx).request("preflight", nativeCapabilities())),
+  });
+  pi.registerCommand("aidevflow-accept", {
+    description: "Record actual business acceptance for one verified zsspec module",
+    handler: async (args, ctx) => {
+      const module = args.trim();
+      if (!module || /\s/.test(module)) throw new Error("Usage: /aidevflow-accept <module>");
+      const result = await client(ctx).request("method-accept", { module, utterance: `/aidevflow-accept ${module}`, actor: ctx.agent });
+      pi.sendMessage({ customType: "aidevflow.acceptance", content: JSON.stringify(result), display: true }, { triggerTurn: false });
+    },
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {

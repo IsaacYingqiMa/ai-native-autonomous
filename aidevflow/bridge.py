@@ -102,7 +102,7 @@ def dispatch(root: Path, action: str, payload: dict[str, Any]) -> Any:
         from .workflow import Workflow
         workflow = Workflow(root)
         if action == "flow-enter":
-            return workflow.enter(payload.get("text", ""), payload.get("discussion_only", False))
+            return workflow.enter(payload.get("text", ""), payload.get("discussion_only", False), payload.get("approved_action", ""))
         if action == "review-prepare":
             return workflow.prepare_review(payload["session_id"])
         return workflow.respond(payload["discovery_id"], payload["token"], payload["session_id"], payload["choice"], payload.get("feedback", ""))
@@ -110,6 +110,9 @@ def dispatch(root: Path, action: str, payload: dict[str, Any]) -> Any:
         from .discovery import Discovery
         return Discovery(root).approve(payload["id"], payload["revision"], payload["sha256"],
                                        "omp user", payload["utterance"], "native_user_command")
+    if action == "method-accept":
+        from .method_execution import execute
+        return execute(root, "close", payload["module"], by="omp user", utterance=payload["utterance"])
     if action == "ping":
         return {"protocol": 1, "runtime": selected(root), "python": sys.executable}
     if action == "status":

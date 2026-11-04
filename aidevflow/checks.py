@@ -57,7 +57,7 @@ def record_design_review(gate: Any, reviewer: str, reason: str, paths: list[str]
     gate._require_stage(state, "design")
     gate.integrity()
     if not enabled(contract):
-        raise GateError("record-design-review requires zsspec-managed-v1")
+        raise GateError("record-design-review requires a zsspec managed profile")
     if state.get("frozen_tests"):
         raise GateError("Tests are already frozen; do not rewrite the design review baseline")
     if not reviewer.strip() or not reason.strip():

@@ -293,9 +293,20 @@ class DiscoveryTests(GateFixture):
     def test_new_feedback_after_approval_reopens_discussion_before_delivery(self):
         self.approve()
         result = Workflow(self.root).enter('Add finance approval to the requirements')
+        self.assertEqual(result['action'], 'choose_approved_action')
+        self.assertIsNotNone(self.discovery.load()[0]['requirements_ref'])
+        result = Workflow(self.root).enter('Add finance approval to the requirements', approved_action='revise')
         self.assertEqual(result['action'], 'discuss')
         self.assertIsNone(self.discovery.load()[0]['requirements_ref'])
         self.assertFalse(self.gate.active_path.exists())
+
+    def test_execution_instruction_does_not_invalidate_approved_requirements(self):
+        self.approve()
+        text = '请根据已经确认的需求继续设计开发，直到完成'
+        self.assertEqual(Workflow(self.root).enter(text)['action'], 'choose_approved_action')
+        result = Workflow(self.root).enter(text, approved_action='continue')
+        self.assertEqual(result['action'], 'deliver')
+        self.assertEqual(result['user_text'], text)
 
     def test_interrupted_review_handoff_recovers_the_same_operation(self):
         self.record()

@@ -47,7 +47,7 @@ def role_context(root: Path, role: str) -> dict[str, Any]:
         task = (f"Read {state['request_snapshot_path']}, {state['intent_path']}, .aidevflow/contract.example.json "
                 "and .aidevflow/schemas/contract.schema.json. Inspect relevant business project context only. "
                 f"Use the assigned task_id {state['task_id']}. Available method assets live in {skills_root(root).relative_to(root).as_posix()}. "
-                "For zsspec use zsspec-managed-v1 with its complete Design/Build/Review stages, one cohesive work item for a small feature, "
+                "For the current zsspec-plan package use zsspec-managed-v2: Design req/plan/test, Build apply, Review test/done. Declare method.modules and method.acceptance_map from every canonical approved acceptance ID to native AC IDs; preserve canonical IDs exactly. If only the old des/task/chk/verify package is installed use the legacy example/profile without upgrading any existing run. Use one cohesive work item for a small feature, "
                 "work_plan_required=true, concrete test argv and required_checks covering all acceptance IDs. "
                 "Do not use an unavailable test runner. Return one complete Contract JSON via native yield; do not implement or write state. "
                 "specs/zsspec.yml and method assets are project setup inputs, never generated design artifacts. "

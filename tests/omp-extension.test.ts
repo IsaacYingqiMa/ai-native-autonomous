@@ -91,6 +91,38 @@ test("single entry routes natural-language requirements without asking for comma
   } finally { f.cleanup(); }
 });
 
+test("approved scope routing preserves input and uses an actual native user choice", async () => {
+  const f = reviewedFixture(); requests.length = 0;
+  workflowRoute = { action: "choose_approved_action" };
+  f.setChoice("按已批准需求继续开发");
+  try {
+    await (f.commands.get("aidevflow-flow") as any).handler("按我的需求完成开发", f.ctx);
+    const entries = requests.filter(r => r.action === "flow-enter");
+    expect(entries.length).toBe(2);
+    expect(entries[1].payload.approved_action).toBe("continue");
+    expect(entries[1].payload.text).toBe("按我的需求完成开发");
+  } finally { f.cleanup(); }
+});
+
+test("closing the approved scope choice preserves approval without resuming", async () => {
+  const f = reviewedFixture(); requests.length = 0;
+  workflowRoute = { action: "choose_approved_action" }; f.setChoice(undefined);
+  try {
+    await (f.commands.get("aidevflow-flow") as any).handler("new text", f.ctx);
+    expect(requests.filter(r => r.action === "flow-enter").length).toBe(1);
+    expect(f.prompts.length).toBe(0);
+  } finally { f.cleanup(); }
+});
+
+test("only explicit business acceptance command invokes method close", async () => {
+  const f = fixture(); requests.length = 0;
+  try {
+    await (f.commands.get("aidevflow-accept") as any).handler("feature", f.ctx);
+    expect(requests.find(r => r.action === "method-accept")?.payload.utterance).toBe("/aidevflow-accept feature");
+    expect(f.prompts.length).toBe(0);
+  } finally { f.cleanup(); }
+});
+
 test("review checkpoint accepts a human choice and continues the same workflow", async () => {
   const f = reviewedFixture(); requests.length = 0; gateStatus = { status: "review_ready" };
   try {

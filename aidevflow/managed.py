@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 PROFILE = "zsspec-managed-v1"
+from .method_registry import V2, adapter_for
 DESIGN_SKILLS = ["zsspec-req", "zsspec-des", "zsspec-task", "zsspec-chk", "zsspec-verify"]
 DEFAULTS = {"paths": {"skills_root": "auto"}, "test": {"e2e": "enabled", "manual": "enabled"},
             "parallel": {"mode": "auto", "max": "3"}, "gate": {"mode": "strict"}}
@@ -15,7 +16,7 @@ DEFAULTS = {"paths": {"skills_root": "auto"}, "test": {"e2e": "enabled", "manual
 
 def enabled(contract: dict[str, Any] | None) -> bool:
     method = contract.get("method") if isinstance(contract, dict) else None
-    return isinstance(method, dict) and method.get("profile") == PROFILE
+    return isinstance(method, dict) and method.get("profile") in (PROFILE, V2)
 
 
 def file_hash(path: Path) -> str | None:
@@ -31,6 +32,10 @@ def package_version(root: Path, state: dict[str, Any]) -> int:
 def package_manifest(root: Path, contract: dict[str, Any], *, version: int = 2) -> dict[str, Any]:
     """Fingerprint actual method instructions, references and templates, not telemetry."""
     from .runtimes import skills_root
+    adapter = adapter_for(contract)
+    if adapter:
+        from .method_resolution import inventory, source_for
+        return inventory(source_for(root, contract), {n for v in adapter.stages.values() for n in v} | set(adapter.support))
     base = skills_root(root)
     names = {name for values in contract.get("method", {}).get("stages", {}).values() for name in values}
     names.update(("zsspec-standard", "zsspec-change"))
@@ -51,7 +56,7 @@ def package_manifest(root: Path, contract: dict[str, Any], *, version: int = 2) 
     return {"sha256": digest, "files": files, **({"manifest_version": version} if version >= 2 else {})}
 
 
-def read_policy(root: Path) -> dict[str, Any]:
+def read_policy(root: Path, contract: dict | None = None) -> dict[str, Any]:
     """Read the documented two-level scalar YAML subset without adding a runtime dependency.
 
     Unsupported YAML is rejected explicitly; it is never partially interpreted.
@@ -98,7 +103,7 @@ def read_policy(root: Path) -> dict[str, Any]:
             raise GateError(f"Invalid zsspec.yml test.{key}; use enabled or disabled")
     if values["parallel"]["mode"] not in ("auto", "off") or not values["parallel"]["max"].isdigit() or int(values["parallel"]["max"]) < 1:
         raise GateError("Invalid zsspec.yml parallel configuration")
-    return {"schema": "aidevflow/method-policy-v1", "profile": PROFILE,
+    return {"schema": "aidevflow/method-policy-v1", "profile": V2 if adapter_for(contract) else PROFILE,
             "config_path": "specs/zsspec.yml", "config_sha256": file_hash(path), "configured": values,
             "effective": {"skills_root": effective_root, "gate": "strict", "parallel": "off",
                           "review": "ai_coordinator", "tests": "design_frozen", **values["test"]}}
@@ -113,17 +118,20 @@ def validation_errors(contract: dict[str, Any]) -> list[str]:
     method = contract.get("method", {})
     if not isinstance(method, dict) or "profile" not in method:
         return []
-    if method["profile"] != PROFILE:
-        return [f"Unknown method profile; supported: {PROFILE}"]
+    if method["profile"] not in (PROFILE, V2):
+        return [f"Unknown method profile; supported: {PROFILE}, {V2}"]
     errors = []
-    if method.get("name") != "zsspec":
+    adapter = adapter_for(contract)
+    if adapter:
+        errors.extend(adapter.validate(contract))
+    elif method.get("name") != "zsspec":
         errors.append("zsspec-managed-v1 requires method.name=zsspec")
     stages = method.get("stages", {})
     minimum = {"design": DESIGN_SKILLS + ["zsspec-test"], "build": ["zsspec-apply"],
                "review": ["zsspec-test", "zsspec-done"]}
-    if not isinstance(stages, dict) or set(stages) - set(minimum) or any(
+    if not adapter and (not isinstance(stages, dict) or set(stages) - set(minimum) or any(
             not isinstance(stages.get(phase), list) or any(name not in stages[phase] for name in names)
-            for phase, names in minimum.items()):
+            for phase, names in minimum.items())):
         errors.append("Managed v1 requires req/des/task/chk/verify/test Design, apply Build, and test/done Review (additional skills are allowed)")
     if contract.get("work_plan_required") is not True or contract.get("verifier", {}).get("required", True) is not True:
         errors.append("Managed v1 requires a work plan and independent verification")

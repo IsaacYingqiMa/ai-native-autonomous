@@ -65,6 +65,18 @@ def build_parser() -> argparse.ArgumentParser:
     continuation = sub.add_parser("continuation", help="select one owner of turn continuation; never accepts business work")
     continuation.add_argument("--owner", required=True, choices=("native", "bounded_stop", "manual"))
     sub.add_parser("sync-projections", help="project Gate state into registered generated-document status cells")
+    sub.add_parser("method-inspect", help="discover/cache a candidate method description; never activates a task")
+    method = sub.add_parser("method-run", help="run the task's pinned method on staged specs")
+    method.add_argument("operation", choices=("status", "verify", "gate", "baseline", "report", "sync"))
+    method.add_argument("--module")
+    method.add_argument("--scope", choices=("req", "des", "task", "chk"))
+    method.add_argument("--evidence", nargs="*", default=[])
+    method = sub.add_parser("method-recover", help="recover an interrupted method transaction")
+    method.add_argument("--mode", choices=("finish", "rollback"), required=True)
+    method = sub.add_parser("method-accept", help="operator business acceptance after verified delivery")
+    method.add_argument("--module", required=True)
+    method.add_argument("--by", required=True)
+    method.add_argument("--utterance", required=True)
     resume = sub.add_parser("resume-run", help="resume human handling only after an explicit user instruction")
     resume.add_argument("--by", required=True)
     resume.add_argument("--utterance", required=True)
@@ -232,6 +244,18 @@ def _main(argv: list[str] | None = None) -> int:
         elif args.command == "continuation":
             from .continuation import set_owner
             result = set_owner(Path(args.root), args.owner)
+        elif args.command == "method-inspect":
+            from .method_resolution import discover
+            result = discover(Path(args.root).resolve())
+        elif args.command == "method-run":
+            from .method_execution import execute
+            result = execute(Path(args.root), args.operation, args.module, args.scope, args.evidence)
+        elif args.command == "method-recover":
+            from .method_execution import recover
+            result = recover(Path(args.root), args.mode)
+        elif args.command == "method-accept":
+            from .method_execution import execute
+            result = execute(Path(args.root), "close", args.module, by=args.by, utterance=args.utterance)
         elif args.command == "sync-projections":
             result = gate.sync_projections()
         elif args.command == "resume-run":
@@ -321,7 +345,10 @@ def _main(argv: list[str] | None = None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command in ("doctor", "status", "discovery-status", "role-context", "diagnose-evidence", "install"):
+    if args.command in ("doctor", "status", "discovery-status", "role-context", "diagnose-evidence", "install",
+                        "method-inspect", "method-run", "method-recover", "method-accept", "sync-projections"):
+        # Scripted operations own short prepare/commit locks and an independent
+        # worker lease; an outer writer lock would cover the whole subprocess.
         return _main(argv)
     from .locking import writer_lock
     try:

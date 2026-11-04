@@ -37,9 +37,9 @@ def main(delay_seconds=0, stop_probe=False):
         example = read_json(root / ".aidevflow/contract.example.json")
         names = {name for group in example["method"]["stages"].values() for name in group}
         for name in names | {"zsspec-standard", "zsspec-change"}:
-            path = root / ".omp/skills" / name / "SKILL.md"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"---\nname: {name}\ndescription: Synthetic probe fixture; never execute.\n---\nProbe only.\n", encoding="utf-8")
+            shutil.copytree(SOURCE / '.claude/skills' / name, root / '.omp/skills' / name,
+                            dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+        shutil.copy2(SOURCE / '.claude/skills/README.md', root / '.omp/skills/README.md')
         fixture.record()
         if stop_probe:
             # Exercise the real extension's stop handler, without any model request.

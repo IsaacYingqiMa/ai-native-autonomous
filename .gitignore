@@ -1,4 +1,6 @@
 .aidevflow/runs/
+.aidevflow/method-cache/
+.aidevflow/method-operation.lock
 .aidevflow/bundles/
 .aidevflow/maintenance/
 .aidevflow/active-run.json

@@ -1,5 +1,7 @@
 # AI 自主套件完整使用教程（Windows / omp）
 
+当前含 `zsspec-plan` 的方法包使用 `zsspec-managed-v2`，完整流程、版本隔离与恢复见 [当前 zsspec 适配说明](ZSSPEC-MANAGED.md)。旧任务保持原规则。
+
 适用：当前工作区的 AIDevFlow、omp 18.13.2、`reviewed-discovery-v1`。核对日期：2026-11-01。
 
 这份教程把一次性安装和每天使用分开。PowerShell 是执行安装命令的终端；omp 是你与 AI 对话的界面。`python ...`、`git ...` 在 PowerShell 输入；`/aidevflow-flow` 等斜杠命令在 omp 输入。复制代码框里的命令，不复制代码框标记。
@@ -119,11 +121,13 @@ Get-Content .aidevflow/project.json
 $MethodSource = Join-Path $AidevflowSource '.claude\skills'
 $MethodTarget = Join-Path $AidevflowProject '.omp\skills'
 $MethodNames = @(
-  'README.md', '.skillhub',
-  'zsspec-req', 'zsspec-des', 'zsspec-task', 'zsspec-chk',
-  'zsspec-verify', 'zsspec-test', 'zsspec-apply', 'zsspec-done',
+  'README.md',
+  'zsspec-req', 'zsspec-plan', 'zsspec-test', 'zsspec-apply', 'zsspec-done',
   'zsspec-change', 'zsspec-init', 'zsspec-standard', 'zsspec-feedback'
 )
+if (Test-Path -LiteralPath (Join-Path $MethodSource '.skillhub')) {
+  $MethodNames += '.skillhub'
+}
 foreach ($MethodName in $MethodNames) {
   if (-not (Test-Path -LiteralPath (Join-Path $MethodSource $MethodName))) {
     throw "方法源缺少：$MethodName"
@@ -318,7 +322,7 @@ python -B scripts/aidevflow.py archive
 
 需求版本、反馈、批准保存在 `.aidevflow/discoveries/`；交付状态与证据在 `.aidevflow/runs/` 等目录。这些运行数据多数被 Git 忽略：只推送代码不能完整迁移运行现场，换电脑或升级前需单独备份。
 
-升级前停止所有写入会话，保存业务改动并备份运行数据；重装相同后端与 profile，重启后 doctor/status。不要在活动任务中替换固定方法包；运行时变化可能要求重新收集检查证据。
+升级前停止所有写入会话，保存业务改动并备份运行数据；重装相同后端与 profile，重启后 doctor/status。v2 任务使用独立方法源快照，更新外部技能不切换该任务的方法；旧 v1 任务仍禁止替换其固定方法包。运行时变化可能要求重新收集检查证据。
 
 首次团队试点记录：总耗时、模型费用、人工决策次数、人工介入分钟数、需求返工次数、验收通过率、恢复是否成功。先用小任务验证，再逐步增加项目复杂度。是否达到“80% 完成度”，应按事先约定的业务验收清单统计，不能按文件数量或 AI 自报比例统计。
 

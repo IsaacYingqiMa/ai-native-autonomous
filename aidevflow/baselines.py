@@ -110,6 +110,9 @@ def plan_revision(gate, draft_path: str) -> dict:
     if errors:
         raise GateError("Invalid revised Contract: " + "; ".join(errors))
     plan = read_json(draft_file(gate, state, draft["work_plan_draft"])) if draft.get("work_plan_draft") else gate._plan(state)
+    from .method_registry import adapter_for
+    if adapter_for(new_contract) and plan:
+        plan["method_profile"] = new_contract["method"]["profile"]
     if new_contract.get("work_plan_required") and not plan:
         raise GateError("A revised work plan is required")
     if plan:
@@ -152,6 +155,9 @@ def plan_revision(gate, draft_path: str) -> dict:
         acceptance = {item["id"] for item in new_contract.get("acceptance_items", [])}
         if acceptance - {ref for item in plan["items"] for ref in item.get("acceptance_items", [])}:
             raise GateError("Revised work plan must cover all acceptance items")
+    if adapter_for(new_contract):
+        from .method_execution import validate_revision
+        validate_revision(gate, state, new_contract, plan, files)
     proposal = {"schema": "aidevflow/baseline-proposal-v1", "id": "BL-" + secrets.token_hex(12),
                 "task_id": state["task_id"], "subject_sha256": subject(gate, state, contract),
                 "reason": draft["reason"], "old_baseline_id": baseline_id(state), "old_contract": contract,

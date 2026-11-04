@@ -1,0 +1,130 @@
+{
+  "schema": "aidevflow/contract-v1",
+  "task_id": "SAMPLE-001",
+  "title": "Sample feature task",
+  "method": {
+    "name": "zsspec",
+    "profile": "zsspec-managed-v1",
+    "stages": {
+      "design": [
+        "zsspec-req",
+        "zsspec-des",
+        "zsspec-task",
+        "zsspec-chk",
+        "zsspec-verify",
+        "zsspec-test"
+      ],
+      "build": [
+        "zsspec-apply"
+      ],
+      "review": [
+        "zsspec-test",
+        "zsspec-done"
+      ]
+    }
+  },
+  "max_repair_attempts": 3,
+  "work_plan_required": true,
+  "test_timeout_seconds": 300,
+  "code_paths": [
+    "src/**",
+    "app/**",
+    "backend/**",
+    "frontend/src/**"
+  ],
+  "evidence_paths": [
+    "specs/checklist/reports",
+    "test-results",
+    "playwright-report"
+  ],
+  "design_artifacts": [
+    "specs/requirement/feature/REQ-feature.md",
+    "specs/design/feature/DES-feature-后端.md",
+    "specs/task/feature/TASK-feature.md",
+    "specs/checklist/feature/CHK-feature.md"
+  ],
+  "test_files": [
+    "tests/test_feature.py"
+  ],
+  "test_support_files": [],
+  "red_test_files": [
+    "tests/test_feature.py"
+  ],
+  "test_commands": {
+    "red": [
+      "python",
+      "-m",
+      "pytest",
+      "{target}",
+      "-q"
+    ],
+    "green": [
+      "python",
+      "-m",
+      "pytest",
+      "{target}",
+      "-q"
+    ],
+    "regression": [
+      "python",
+      "-m",
+      "pytest",
+      "tests",
+      "-q"
+    ]
+  },
+  "acceptance_items": [
+    {
+      "id": "REQ-feature-目标",
+      "criterion": "Replace this with an observable acceptance criterion."
+    }
+  ],
+  "required_checks": [
+    {
+      "id": "CHECK-static",
+      "kind": "static",
+      "acceptance_items": [
+        "REQ-feature-目标"
+      ]
+    },
+    {
+      "id": "CHECK-feature",
+      "suite": "green",
+      "target": "tests/test_feature.py",
+      "acceptance_items": [
+        "REQ-feature-目标"
+      ]
+    },
+    {
+      "id": "CHECK-regression",
+      "suite": "regression",
+      "acceptance_items": [
+        "REQ-feature-目标"
+      ]
+    }
+  ],
+  "routing": {
+    "acceptance_test_failure": {
+      "to": "build"
+    },
+    "review_finding": {
+      "to": "build"
+    },
+    "spec_ambiguity": {
+      "to": "needs_human"
+    },
+    "integrity_mismatch": {
+      "to": "needs_human"
+    }
+  },
+  "verifier": {
+    "required": true,
+    "input_policy": "bundle-only",
+    "required_fields": [
+      "task_id",
+      "spec_version",
+      "items",
+      "risks"
+    ]
+  }
+}

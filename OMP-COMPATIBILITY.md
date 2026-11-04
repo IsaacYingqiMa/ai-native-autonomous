@@ -1,5 +1,7 @@
 # OMP 适配与恢复
 
+当前含 `zsspec-plan` 的方法包使用 `zsspec-managed-v2`，完整流程、版本隔离与恢复见 [当前 zsspec 适配说明](ZSSPEC-MANAGED.md)。旧任务保持原规则。
+
 协议基线为 omp 18.13.2。OMP 为主要执行器，Claude 兼容适配独立保留。设计目标不等于已验证能力。
 
 ## 任务与回执

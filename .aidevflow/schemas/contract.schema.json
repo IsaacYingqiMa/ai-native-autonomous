@@ -140,7 +140,10 @@
           "const": "zsspec"
         },
         "profile": {
-          "const": "zsspec-managed-v1"
+          "enum": [
+            "zsspec-managed-v1",
+            "zsspec-managed-v2"
+          ]
         },
         "stages": {
           "type": "object",
@@ -164,8 +167,51 @@
               }
             }
           }
+        },
+        "modules": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "acceptance_map": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^AC-"
+            }
+          }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "profile": {
+                "const": "zsspec-managed-v2"
+              }
+            },
+            "required": [
+              "profile"
+            ]
+          },
+          "then": {
+            "required": [
+              "modules",
+              "acceptance_map",
+              "stages"
+            ]
+          }
+        }
+      ]
     },
     "routing": {
       "type": "object",

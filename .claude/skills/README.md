@@ -1,46 +1,53 @@
 # ZSSpec 技能包
 
-基于 Spec-Driven Development (SDD) 规范驱动开发的 Claude Code 技能包。
+基于 Spec-Driven Development (SDD) 规范驱动开发的 Claude Code 技能包。规格链路由校验脚本机器化保障：编号、覆盖闭合、越界、快照一致、状态迁移全部脚本断言，模型零手编状态。
 
 ## 技能列表
 
+**随包分发（9 个技能）**
+
 | 技能 | 职责 | 触发语 |
 |------|------|--------|
-| `zsspec-init` | 项目初始化 | "初始化项目""创建CLAUDE.md" |
-| `zsspec-req` | 需求讨论收敛与 REQ 生成（`--docs` 读取 reference/ 产品文档） | "这个功能怎么做""帮我梳理需求""写需求""落REQ" |
-| `zsspec-des` | 基于已定稿 REQ 生成 DES-前端/后端设计文档 | "写设计文档""设计接口""定数据模型" |
-| `zsspec-task` | 基于 REQ+DES 生成 TASK，并输出需求×任务覆盖对照（漏覆盖拦截） | "拆任务""写任务清单""补TASK" |
-| `zsspec-chk` | 基于 REQ/DES/TASK 生成 CHK 检查清单（测试用例）文档（automation=static/auto/manual） | "写检查清单""生成 CHK""生成测试用例" |
-| `zsspec-verify` | 开发前一致性校验、门禁判断与全局治理检查（默认聚焦小模块/子功能，支持 module/global scope） | "检查spec是否能开工""先查REQ/TASK/CHK/DES是否一致""看看当前这小块够不够写""检查整个specs体系是否健康" |
-| `zsspec-apply` | 开发准入与执行（按 TASK 驱动开发并即时回写 TASK 状态） | "开始写代码""开搞""实现了" |
-| `zsspec-test` | CHK 检查项统一测试执行：--static 静态审查 / --auto e2e 闭环 / --manual chrome-devtools-mcp 辅助检查；无参数自动流水线并回写状态 | "帮我review代码""做代码审查""合并前看一下""生成测试代码""跑测试""运行 e2e""执行检查项""测试报告" |
-| `zsspec-done` | 判定 REQ 是否可更新为已完成；若前序 TASK/CHK 未收口则打回对应阶段 | "做完了""验一下""确认完成" |
-| `zsspec-change` | 变更处理（含Bug修复） | "要改一下""有问题""修复" |
+| `zsspec-init` | 项目初始化（协作入口 / zsspec.yml / 公共设计） | "初始化项目""创建CLAUDE.md" |
+| `zsspec-req` | 需求讨论收敛与 REQ 生成（`--docs` 读 reference/ 产品文档）；确认后经脚本 `baseline` 定稿 | "这个功能怎么做""帮我梳理需求""写需求""落REQ" |
+| `zsspec-plan` | **规格设计三层**：无参自动流水线，`--des` / `--task` / `--chk` 单阶段，`--update` 增量重编；每阶段 verify 断言 + baseline 定稿 | "写设计文档""拆任务""写检查清单""生成测试用例""生成规格文档" |
+| `zsspec-apply` | 开发执行：`gate` 开工门禁；TASK 唯一执行依据（AC 快照内联）；状态经脚本 `set` 回写 | "开始写代码""开搞""实现了" |
+| `zsspec-test` | CHK 统一测试执行：`--static` 读代码 / `--auto` e2e / `--manual` 看界面；无参自动流水线 | "帮我review代码""跑测试""运行 e2e""执行检查项""测试报告" |
+| `zsspec-done` | 验收收口：脚本 `report` 对账 → 用户确认 → `close` 置功能点已完成 | "做完了""验一下""确认完成" |
+| `zsspec-change` | 变更处理（含 Bug 修复）：修订上游后脚本 `stale` 置下游待同步 → `plan --update` 重编 | "要改一下""有问题""修复" |
 | `zsspec-feedback` | 技能包问题/建议反馈上报（可选附会话记录） | "反馈问题""上报问题""提建议" |
-| `zsspec-standard` | 模板规范（不直接执行） | - |
-| `zsspec-doctor` | 技能包评审诊断（**仅维护侧，不随包分发**）：反馈 → 证据 → 处置建议报告（立即改/缓改/不动/观察） | "技能包有问题""评审这些反馈""出改造方案" |
+| `zsspec-standard` | 模板规范 + 校验脚本（不直接执行） | - |
 
-## 测试域怎么选
-
-> 为什么有这一节：chk / verify / test / done 的触发语都带"检查/验证/测试"语义，是套件里最易混淆的一组（真实反馈："chk/test/verify/done 都像测试，不知道用哪个"）。按"你要回答的问题"定位，30 秒选对入口；技能增删时随技能表同步维护本表。
-
-| 你要回答的问题 | 用谁 | 一句话区分 |
-|---|---|---|
-| 测试用例清单还没生成？ | `zsspec-chk` | **造单**：写 CHK 检查项文档 |
-| specs 文档一致吗、能开工吗？ | `zsspec-verify` | **审单**：spec 门禁，不碰代码 |
-| 代码/系统/界面真的对吗？ | `zsspec-test` | **执行**：static 读代码 / auto 跑系统 / manual 看界面 |
-| 全部做完、可以收尾了吗？ | `zsspec-done` | **收口**：验收判定与状态同步 |
-
-顺序记忆：chk 造单 → verify 审单 → test 执行 → done 收口。
+**维护侧（不随包分发）**：`zsspec-doctor` —— 技能包评审诊断（"技能包有问题""评审这些反馈""出改造方案"）。
 
 ## 流程图
 
 ```
-init → req → des → task → chk → verify → apply → test → done
- ↑      ↑      ↑      ↑        ↑         ↑       ↑      ↑
- └change┴──────┴────────┴────────┴─────────┴───────┴──────┘
-（test 内部：static 读代码 → auto 跑系统 → manual 看界面）
+init → req → plan(des→task→chk) → apply → test → done
+ ↑      ↑            ↑              ↑       ↑      ↑
+ └change┴────────────┴──────────────┴───────┴──────┘
+（每层经脚本 verify 断言 + baseline 定稿；apply/test 经脚本 set 回写；done 经 report/close）
 ```
+
+规格链核心机制（详见 `zsspec-standard/spec-rules.md` 第 9/10 节）：**接力棒模型**（每层只读一份上游：DES 要点表内联 AC 快照承接 REQ，TASK/CHK 只读 DES/TASK，不回看 REQ）+ **两条不变量**（覆盖闭合、无越界，脚本断言）+ **状态唯一落点**（文档状态/条目状态全部脚本回写）。
+
+## 校验脚本
+
+`{skills_root}/zsspec-standard/scripts/zsspec_check.py`，纯标准库 Python 3.8+。**调用者是模型**（各技能按 SKILL.md 固定步骤调用），人不直接调用；stdout 结论先行 + 失败项定位 + 下一步建议，写命令全支持 `--dry-run`：
+
+| 命令 | 作用 | 调用者 |
+|---|---|---|
+| `status <模块>` | 链路状态 + 条目进度 + 下一步建议 | plan / apply 入口 |
+| `verify <模块> [--global]` | 六断言：A1 编号 / A2 覆盖闭合 / A3 无越界 / A4 快照一致（自动置下游待同步）/ A5 状态合法 / A6 齐套 | plan 链尾、随时 |
+| `gate <模块>` | 开工门禁：全定稿 + 无待同步 + 覆盖闭合 | apply 开工 |
+| `baseline <模块> <范围>` | 草稿/待同步 → 已定稿（逐层前置，先全验后全写） | req / plan 确认后 |
+| `stale <模块> <范围>` | 修订上游后置下游待同步（范围=被修订的源层 req/des/task） | change / req --update 后 |
+| `set <条目ID> <状态> [--note]` | 条目回写：ID 全局唯一定位 + 迁移校验 + 写后复读 | apply（TASK）/ test（CHK） |
+| `report <模块>` | AC×TASK×CHK 对账表 + specs/index.md | done 入口 |
+| `close <模块>` | 全链校验通过 → 功能点原子置已完成（strict 判定机器化） | done 用户确认后 |
+| `discard <模块>` | 模块整链下线：全部文档置已废弃（终态，唯一写入通道），verify/gate 跳过 | change 判定模块废弃 |
+| `migrate <模块> [--apply]` | 存量旧格式文档迁移（默认 dry-run 展示计划） | 存量项目升级 |
+| `selftest` | fixtures 驱动自测（分发前必绿） | doctor / 分发校验 |
 
 ## 使用方式
 
@@ -50,21 +57,17 @@ init → req → des → task → chk → verify → apply → test → done
 - **全局级**：复制到用户主目录 `~/.claude/skills/`（CodeBuddy 为 `~/.codebuddy/skills/`），所有项目共享
 
 > 注 1：`zsspec-doctor` 为维护侧评审技能，仅保留在技能包维护仓库，**分发/安装时排除该目录**。
-> 注 2：`.skillhub/` 为使用量监测共享脚本目录（隐藏目录，见下「使用量监测」），**分发/安装时必须一并复制**。
 
-技能包根定位（skills_root）由 `specs/zsspec.yml` 的 `paths.skills_root` 控制（缺省 `auto`，按解析链自适应项目级/全局级安装，详见 `zsspec-standard/spec-rules.md` 第 6 节）：
+技能包根定位（skills_root）由 `specs/zsspec.yml` 的 `paths.skills_root` 控制（缺省 `auto`，详见 `zsspec-standard/spec-rules.md` 第 6 节）：
 
 ```
 {skills_root}/
-├── .skillhub/
-│   └── skillhub_log.py（使用量监测共享脚本）
 ├── zsspec-init/SKILL.md
 ├── zsspec-req/SKILL.md
-├── zsspec-des/SKILL.md
-├── zsspec-task/SKILL.md
-├── zsspec-verify/SKILL.md
+├── zsspec-plan/
+│   ├── SKILL.md
+│   └── stage/（des.md / task.md / chk.md 阶段细则）
 ├── zsspec-apply/SKILL.md
-├── zsspec-chk/SKILL.md
 ├── zsspec-test/
 │   ├── SKILL.md
 │   └── reference/（static.md / auto.md / manual.md / playwright-code.md）
@@ -76,10 +79,8 @@ init → req → des → task → chk → verify → apply → test → done
 └── zsspec-standard/
     ├── SKILL.md
     ├── spec-rules.md
-    ├── requirement/
-    ├── design/
-    ├── task/
-    └── checklist/
+    ├── scripts/（zsspec_check.py + skillhub_log.py + README.md + fixtures/）
+    ├── requirement/  design/  task/  checklist/
 ```
 
 ### 在其他编程工具中使用（oh-my-pi、opencode、CodeBuddy 等）
@@ -91,214 +92,102 @@ init → req → des → task → chk → verify → apply → test → done
 
 ### 使用量监测（随包注入，零阻塞）
 
-每个技能的 SKILL.md 首部注入 3 行引导块：技能被使用时先运行 `.skillhub/skillhub_log.py --skill "@zsspec/<技能名>"`，向本机 `%LOCALAPPDATA%\SkillHub\usage.log` 追加一行 JSON 日志（使用人/技能/时间/主机/项目），并由后台进程批量上报至企业合规服务器（172.22.4.49，SkillHub 平台，失败自动补传）。机制移植自 SkillHub，与企业内其他 SkillHub 技能共享本机身份登记。
+每个技能的 SKILL.md 首部注入 3 行引导块：技能被使用时先运行 `zsspec-standard/scripts/skillhub_log.py --skill "@zsspec/<技能名>" --data \'{<模块>,<模式参数>,<一句话描述>}\'`，向本机 `%LOCALAPPDATA%\SkillHub\usage.log` 追加一行 JSON 日志（使用人/技能/时间/主机 + 本次使用上下文：模块名、模式参数、一句话描述），并由后台进程批量上报至企业合规服务器（SkillHub 平台，失败自动补传）。机制移植自 SkillHub，与企业内其他 SkillHub 技能共享本机身份登记。
 
-**协议集中定义，技能内不重复**：身份登记协议（NEED_PROFILE / --set-profile / --skip）由脚本 stdout 指引自描述，机制与数据链路见 `.skillhub/README.md`——改协议只动脚本一处，13 个技能的引导块零改动。
+**上报地址可配置**（服务器会迁移，如 4.49 → 4.48；**项目实际开发以 `specs/zsspec.yml` 的 `skillhub.report_url` 为准**）：优先级为环境变量 `SKILLHUB_REPORT_URL` > `specs/zsspec.yml` 的 `skillhub.report_url` > 脚本内建默认（兜底，指向当前服务器）；配置项支持裸地址（自动补端点路径）或完整 URL，缺失/非法一律回落默认不报错。机制见 `zsspec-standard/spec-rules.md` 第 6.3 节。
+
+**协议集中定义，技能内不重复**：身份登记协议（NEED_PROFILE / --set-profile / --skip）由脚本 stdout 指引自描述，机制与数据链路见 `zsspec-standard/scripts/README.md`——改协议只动脚本一处，全部技能的引导块零改动。
 
 **反馈同通道**：zsspec-feedback 的反馈数据（含可选会话记录）走同一 SkillHub 接口上报（`skill=@zsspec/zsspec-feedback`，内容在 data 字段，与使用数据 clientId 同人关联；会话记录须用户显式确认才附带，见该技能 HARD GATES）。
 
 | 要点 | 说明 |
 |---|---|
+| 权限预授权 | 由 `/zsspec-init` 按本机解析到的 skills_root 合并写入项目 `.claude/settings.json`（skillhub_log / zsspec_check / feedback_send 三脚本，只追加缺失项）；**技能包自身不固化授权**（各机安装位置不同），使用者可随时自行增删。未跑 init 的环境首次执行按正常权限确认，批准即可 |
 | 身份登记 | 每台电脑仅一次：首次使用时技能会询问姓名+部门（登记后永不再问；可拒绝，拒绝后以空身份记录） |
 | 零阻塞 | 上报在分离的后台子进程进行；脚本任何失败（python 缺失/路径错误等）静默跳过，绝不影响技能正常流程 |
-| 隐私边界 | 使用监测仅记录使用人、技能名、时间、主机名与项目路径，不采集会话内容与代码内容；例外是 feedback 附带会话记录（用户显式确认 + 敏感提示 + 5MB 上限） |
+| 隐私边界 | 使用监测记录使用人、技能名、时间、主机名及本次使用上下文（模块名、模式参数、一句话使用描述），不采集会话内容与代码内容；例外是 feedback 附带会话记录（用户显式确认 + 敏感提示 + 5MB 上限） |
+| 上报目标 | `specs/zsspec.yml` 的 `skillhub.report_url` 配置（裸地址或完整 URL），环境变量 `SKILLHUB_REPORT_URL` 优先覆盖；均未提供时按脚本内建默认，服务器迁移改配置即可 |
 | 禁用方式 | 环境变量 `SKILLHUB_NO_UPLOAD=1` 停止上报（仅本地记录）；删除 SKILL.md 中 `ZSSPEC USAGE LOGGER` 注释块可完全移除监测 |
-
-项目 specs 目录结构：
-
-```
-specs/
-├── zsspec.yml                          # 项目配置（测试策略与验收门禁）
-├── requirement/
-│   └ [模块]/REQ-[模块].md
-├── design/
-│   └ [模块]/DES-[模块]-前端.md
-│   └ [模块]/DES-[模块]-后端.md
-├── task/
-│   └ [模块]/TASK-[模块].md
-└── checklist/
-    └ [模块]/CHK-[模块].md
-```
 
 ## 典型使用流程
 
-### 1. 新项目初始化
-
 ```bash
-/zsspec-init
+/zsspec-init                          # 1 初始化（协作入口 + zsspec.yml + 公共设计）
+/zsspec-req 用户管理                   # 2 需求收敛 → 草稿 → 确认后 baseline 定稿
+/zsspec-plan 用户管理                  # 3 规格三层流水线（DES 人工确认；TASK/CHK 断言即质检）
+/zsspec-apply 用户管理                 # 4 gate 开工 → 按 TASK 开发 → set 回写
+/zsspec-test 用户管理                  # 5 三类检查项执行 → set 回写
+/zsspec-done 用户管理                  # 6 report 对账 → 确认 → close 收口
+/zsspec-change 用户管理 调整登录逻辑    # 变更：stale 置下游 → plan --update 重编
 ```
 
-生成：
-- `CLAUDE.md` + `AGENTS.md`（双写，内容同源）- 项目协作入口；CodeBuddy 场景为 `CODEBUDDY.md`
-- `specs/zsspec.yml` - 项目配置（skills_root、测试策略与验收门禁）
-- `specs/design/` - 公共设计文档
+单阶段与增量：`/zsspec-plan 用户管理 --des|--task|--chk|--update`；单端设计 `--des --only=front`。所有模块必经设计（DES 强制）。
 
-### 2. 需求收敛与 REQ 生成
+### 存量项目迁移
 
-```bash
-/zsspec-req 用户管理模块          # 讨论模式收敛需求
-/zsspec-req 用户管理模块 --docs   # 从 reference/ 产品文档解析需求
-```
+存量项目旧格式文档统一走 migrate 通道，进度零丢失：
 
-输出：需求结论表（表格化审查）→ 确认后落盘 `specs/requirement/用户管理/REQ-用户管理.md`
-
-### 3. 生成设计文档
-
-```bash
-/zsspec-des 用户管理
-```
-
-生成（输入：已定稿的 REQ），输出设计要点表供审查后落盘：
-- `specs/design/用户管理/DES-用户管理-前端.md`
-- `specs/design/用户管理/DES-用户管理-后端.md`
-
-### 4. 生成任务清单
-
-```bash
-/zsspec-task 用户管理
-```
-
-生成（输入：REQ + DES），输出任务清单与需求×任务覆盖对照，漏覆盖拦截：
-- `specs/task/用户管理/TASK-用户管理.md`
-
-### 5. 生成测试用例文档
-
-```bash
-/zsspec-chk 用户管理
-```
-
-生成：
-- `specs/checklist/用户管理/CHK-用户管理.md`
-
-### 6. 开发前规格审查
-
-```bash
-/zsspec-verify 用户管理
-```
-
-执行：默认以当前模块或子功能为范围，先做 REQ / DES / TASK / CHK 一致性校验，再做开发前门禁判断；也支持 module/global scope 做模块级或全局 specs 健康治理检查
-
-### 7. 开始开发
-
-```bash
-/zsspec-apply 用户管理
-```
-
-执行：开发准入检查 + 按 TASK 锁定当前开发任务 + 状态更新 + 编码实现 + TASK 状态即时回写
-
-### 8. 统一测试执行（static / auto / manual）
-
-```bash
-/zsspec-test 用户管理                # 自动流水线：static → auto → manual，全量回写状态
-/zsspec-test 用户管理 --static       # 仅静态代码审查（--focus/--scope/--mode 等可选）
-/zsspec-test 用户管理 --auto         # 仅 e2e：生成 Playwright 代码 → review → 执行 → 回写
-/zsspec-test 用户管理 --auto --gen-only # 只生成测试代码，停等 review
-/zsspec-test 用户管理 --manual       # 仅 manual 项：chrome-devtools-mcp 辅助检查 + 截图留证
-```
-
-执行：读取 CHK 检查项，static 做结构化代码审查、auto 做 Playwright 闭环（三层注释溯源、报告落盘 `specs/checklist/reports/<时间戳>/`）、manual 用 chrome-devtools-mcp 操作浏览器截图留证（`通过 (AI辅助)`），统一回写检查项状态
-
-### 9. 完成验收
-
-```bash
-/zsspec-done 用户管理
-```
-
-执行：核对 TASK 与 CHK（static/auto/manual）状态与证据，判定是否可将 REQ 更新为已完成；若前序未收口则打回对应阶段
-
-### 10. 变更处理
-
-```bash
-/zsspec-change 用户管理 需要调整登录逻辑
-```
-
-根据影响程度自动判断处理方式。
+| 场景 | 做法 |
+|---|---|
+| 新项目 | 直接用最新版，无需迁移 |
+| 存量项目 | `zsspec_check.py migrate <模块>`（默认 dry-run 展示 11 类改造计划）→ 人工复核 → `--apply`（存量进度零丢失，状态/编号/锚点自动补齐）→ `verify` 全绿 → REQ 降级锚提示下 `plan --update` 重编固化 |
 
 ## 项目配置（specs/zsspec.yml）
 
-`/zsspec-init` 自动生成到 **`specs/zsspec.yml`**（已存在则不覆盖）；可随时手工修改，改完即时生效，无需重启或同步。
+`/zsspec-init` 自动生成（已存在则不覆盖）；改完即时生效。
 
 ```yaml
 paths:
-  skills_root: auto  # auto（缺省）：按解析链探测技能包根；或显式路径（项目相对/绝对）
+  skills_root: auto  # auto（缺省）：按解析链探测；或显式路径
 test:
   e2e: enabled      # enabled / disabled
   manual: enabled   # enabled / disabled
 parallel:
-  mode: auto          # auto（缺省）/ off：多单元并行开关（spec-rules.md 第 8 节）
+  mode: auto          # auto（缺省）/ off
   max: 3              # 同时执行 PWU 上限
 gate:
   mode: strict      # strict / quick
+skillhub:
+  report_url: 172.22.4.48   # 本项目上报目标（裸地址自动补端点路径，或完整 URL）
 ```
 
-| 字段 | 取值 | 影响 | 消费技能 |
+| 字段 | 取值 | 影响 | 消费方 |
 |---|---|---|---|
-| `paths.skills_root` | `auto`（缺省）/ 显式路径 | 技能包根定位（模板引用前缀）；auto 按 ① 项目 `.claude/skills` → ② 项目 `.codebuddy/skills` → ③ `~/.claude/skills` → ④ `~/.codebuddy/skills` 探测，详见 spec-rules.md 第 6 节 | 全部技能 |
-| `test.e2e` | `enabled`（缺省）/ `disabled` | UI 可操作类验收标准 → 生成 `auto` 检查项 / **不生成**（CHK 备注区留痕，不转 manual） | zsspec-chk、zsspec-test |
-| `test.manual` | `enabled`（缺省）/ `disabled` | 纯视觉/外部系统类 → 生成 `manual` 检查项 / **不生成**（备注区留痕） | zsspec-chk、zsspec-test |
-| `gate.mode` | `strict`（缺省）/ `quick` | strict：CHK 全部收口才能验收；quick：仅强制 static 审查 + TASK 完成 + 用户确认 | zsspec-done |
-| `parallel.mode` | `auto`（缺省）/ `off` | auto：多独立单元且宿主支持子代理时按协议并行；off：一律串行 | 全部执行类技能（des/task/chk/apply/test/verify） |
-| `parallel.max` | `3`（缺省）/ 正整数 | 同时执行的并行工作单元（PWU）上限 | 同上 |
+| `paths.skills_root` | `auto`（缺省）/ 显式路径 | 技能包根定位 | 全部技能与脚本 |
+| `test.e2e` | `enabled`（缺省）/ `disabled` | UI 可操作类 AC → 生成 `auto` 检查项 / 不生成（CHK 备注留痕，不转 manual） | plan --chk、zsspec-test |
+| `test.manual` | `enabled`（缺省）/ `disabled` | 纯视觉/外部系统类 → `manual` 检查项 / 不生成 | plan --chk、zsspec-test |
+| `gate.mode` | `strict`（缺省）/ `quick` | strict：脚本 close 强制全收口；quick：TASK 完成 + static 过 + 用户确认即收口（经 set 显式回写） | zsspec-done |
+| `parallel.mode` | `auto`（缺省）/ `off` | 多独立单元且宿主支持子代理时按协议并行 | plan / apply / test |
+| `parallel.max` | `3`（缺省）/ 正整数 | 并行工作单元上限 | 同上 |
+| `skillhub.report_url` | 裸地址 / 完整 URL（缺省时脚本内建默认兜底） | 监测与反馈上报目标地址（**项目实际上报以此为准**；环境变量 `SKILLHUB_REPORT_URL` 优先） | skillhub_log / feedback_send |
 
-规则：文件不存在 / 字段缺失 / 值非法 → 一律按缺省值执行，不报错；某类型改为 disabled 后，存量对应项在下次 `/zsspec-chk <模块> --update` 时标"跳过"，恢复 enabled 后重置"待执行"，不做类型间转换。
+规则：文件不存在 / 字段缺失 / 值非法 → 一律按缺省值执行，不报错；某类型 disabled 后存量未收口项（待执行/失败/阻塞）在下次 `plan --chk --update` 时标"跳过"（已通过项保持不动），恢复后重置"待执行"，不做类型间转换。
 
 ## 文档规范
 
-命名、变更记录、检索与文档地图规范见: `zsspec-standard/spec-rules.md`
+命名、变更记录、检索、文档地图、数据链与状态协议见 `zsspec-standard/spec-rules.md`（第 9 节数据链、第 10 节状态协议）。
 
 ### 编号格式
 
 | 类型 | 格式 | 示例 |
 |------|------|------|
 | 功能需求 | REQ-{模块}-{功能} | REQ-用户管理-用户新增 |
-| 设计文档 | DES-{模块}-{端} | DES-用户管理-前端 |
+| 验收标准 | AC-{模块}-{功能}-{语义名} | AC-用户管理-用户新增-手机号必填 |
+| 处理规则 | R-{模块}-{功能}-{语义名} | R-用户管理-用户新增-唯一性 |
+| 设计实体 | API/TBL/RULE/FSM/PAGE-{模块}-{语义名} | API-用户管理-用户创建 |
 | 任务 | TASK-{模块}-{功能}-{中文标识} | TASK-用户管理-用户新增-后端接口 |
+| 工程任务 | TASK-ENG-{语义名} | TASK-ENG-项目初始化 |
 | 检查项 | CHK-{模块}-{分类}-{功能} | CHK-用户管理-FUNC-用户新增 |
 
 ### 状态流转
 
-**TASK 状态**
+**文档状态**（脚本维护，唯一落点在头部状态块）：`草稿 → 已定稿 →（上游变更时脚本置）待同步 → 已定稿 / 已废弃`
 
-```
-未开始 → 进行中 → 已完成
-              ↓
-           已废弃
-```
+**TASK 状态**：`未开始 → 进行中 → 已完成 / 已废弃`（两跳完成，非法迁移脚本拦截）
 
-**CHK 状态**
-
-```
-待执行 → 通过
-      ↘ 失败
-      ↘ 阻塞
-      ↘ 跳过
-      ↘ 废弃
-```
+**CHK 状态**：`待执行 → 通过（可带标注）/ 失败 / 阻塞 / 跳过 / 废弃`（通过可回归失败，废弃终态）
 
 ## 版本信息
 
-- 技能包版本: v1.18
+- 技能包版本: v1.4
 - 适用工具: Claude Code 及其他兼容 SKILL.md 格式的编程工具（oh-my-pi、opencode、CodeBuddy 等；WorkBuddy 未验证不承诺）
-
-### 变更记录
-
-| 版本 | 日期 | 更新人 | 说明 |
-|------|------|--------|------|
-| v1.18 | 2026-10-23 | xuzhitu | feedback 上报对接 SkillHub（服务端零改动）：发送脚本 python 重写（feedback-send.js 退役），反馈作为 skill=@zsspec/zsspec-feedback 的记录走 usage-logs/batch 同接口，内容装 data 字段、clientId 与使用监测同人关联；身份自取本机 SkillHub 登记替代 git user.name；暂存收敛到 %LOCALAPPDATA%\SkillHub\feedback-outbox\；v1.11 monitor.url 通道约定退役（yml 模板与配置表删除该字段，环境变量 ZSSPEC_MONITOR_URL/TOKEN 停用），doctor 三处措辞同步 |
-| v1.17 | 2026-10-23 | xuzhitu | 集成使用量监测（移植 SkillHub 机制）：新增共享脚本 .skillhub/skillhub_log.py（本地 JSONL 落盘 + 身份登记协议 + 后台断点续传上报 172.22.4.49），13 个 SKILL.md 注入 3 行引导块（frontmatter 预授权 + 注释块；登记协议由脚本 stdout 自描述，集中定义于 .skillhub/，技能内不重复）；上报复用企业 SkillHub 平台，skill 标识 @zsspec/ 命名空间；README 补监测说明与分发树 |
-| v1.16 | 2026-10-23 | xuzhitu | 新增并行执行协议（spec-rules.md 第 8 节）：PWU 四级（模块/文档/任务/检查类）、读写集封闭、变更清单合并、波次调度、门禁集中、宿主降级链与护栏映射；des/task/chk/apply/test/verify/req/init 八技能挂并行映射；zsspec.yml 增 parallel.mode/max |
-| v1.15 | 2026-10-23 | xuzhitu | doctor 报告形态重构（处置导向）：处置枚举收敛为立即改/缓改/不动/观察（不默认全改，不动/观察为正常结论）；结构简化为处置一览 → 逐条方案（每条≤3行）→ 最终决策回填区 → 附录存档（一行一条）；"待拍板决策"改为"仅 ⚠️ 条目需人表态"，逐条决策由人/执行 AI 回填 |
-| v1.14 | 2026-10-23 | xuzhitu | doctor 输入体系完善：评审来源文件约定 docs/reviews/inputs/（YYYY-MM-DD-描述命名）；新增 --ref 参考输入（背景文档不拆条目仅作诊断上下文）；阶段③前病历库检索（同主题历史结论防翻烧饼） |
-| v1.13 | 2026-10-23 | xuzhitu | 模板双源统一（doctor 首跑报告 D1/D2 落地）：根 spec-standard/（底座）与 zsspec-standard/ 全镜像同步、互不引用，规范文件统一 spec-rules.md（根 README 引用与 CHK 模板引用对齐）；分发树补 zsspec-feedback；新增"测试域怎么选"导航；doctor 体检清单沉淀"双源镜像一致"检查项 |
-| v1.12 | 2026-10-22 | xuzhitu | 新增 zsspec-doctor 维护侧评审技能（反馈 → 证据 → 分级方案 → 5+1 轮自验证 → 待拍板报告，落盘 docs/reviews/；仅维护侧，不随包分发；机械体检 LLM 清单制 reference/checklist.md，报告 3 层 7 节模板） |
-| v1.11 | 2026-10-22 | xuzhitu | 新增 zsspec-feedback 反馈技能：结构化收集缺陷/建议/疑问，可选附会话记录（默认不带、显式确认门禁，精简/原始两模式，原始限 5MB）；随包发送脚本支持本地暂存与自动重发；上报走统一监测通道（zsspec.yml `monitor.url`，环境变量 ZSSPEC_MONITOR_URL 优先，init 模板已含），未配置时落 ~/.zsspec/feedback-outbox/ 暂存 |
-| v1.10 | 2026-10-22 | xuzhitu | 移除技能使用统计：上报脚本、hook、settings.json、usage-server 及全部引用整体删除（SKILL.md 上报节、README 使用统计章节等）；skills_root 解析链与项目记忆多入口（v1.9）保留 |
-| v1.9 | 2026-10-22 | xuzhitu | 跨工具/跨安装方式适配：新增 skills_root 解析机制（spec-rules.md 第 6 节，zsspec.yml `paths.skills_root` 缺省 auto，项目级/全局级/CodeBuddy 安装自适应）；项目协作入口多入口（默认双写 CLAUDE.md + AGENTS.md，CodeBuddy 场景生成 CODEBUDDY.md）；技能内模板路径全部改 `{skills_root}` 前缀，去除 `.claude` 硬编码 |
-| v1.8 | 2026-10-22 | xuzhitu | rules 三文件（命名/检索/文档地图）合并为 zsspec-standard/spec-rules.md；版本递增改为惯例（非硬约束），变更记录保持强制 |
-| v1.7 | 2026-10-22 | xuzhitu | 项目配置 zsspec.yml 落地：init 自动生成；test.e2e 与 test.manual 独立开关（disabled 即该类型整体不做、不转为其他类型，缺省均 enabled）；gate.mode 实现 done 门禁策略化（strict 全量收口 / quick 仅强制 static，缺省 strict） |
-| v1.6 | 2026-10-22 | xuzhitu | zsspec-code-review + zsspec-e2e-test 合并为 zsspec-test：--static/--auto/--manual 三类验证一个入口（-- 前缀避免与自然语言冲突），manual 新增 chrome-devtools-mcp 辅助检查（截图留证、通过 (AI辅助) 标注），无参数自动流水线 static → auto → manual 并回写 CHK 状态 |
-| v1.5 | 2026-10-22 | xuzhitu | zsspec-e2e-gen + zsspec-e2e-run 合并为 zsspec-e2e-test（--gen-only/--run-only，生成后 review 门禁保留，自动修复限白名单并展示 diff，报告统一落盘 specs/checklist/reports/） |
-| v1.4 | 2026-10-22 | xuzhitu | zsspec-test-gen 更名为 zsspec-chk；CHK 格式协议上收 zsspec-standard/checklist 模板（automation 收敛为 auto/manual/static）；chk 支持测试策略联动（specs/zsspec.yml） |
-| v1.3 | 2026-10-21 | xuzhitu | zsspec-spec 拆分为 zsspec-des（设计要点表审查）与 zsspec-task（需求×任务覆盖对照，漏覆盖拦截）并删除 |
-| v1.2 | 2026-10-21 | xuzhitu | 新增 zsspec-req（合并需求讨论与 REQ 生成，支持 --docs 读文档模式）；退役 zsspec-brain；zsspec-spec 瘦身为基于 REQ 生成 DES/TASK |
-| v1.1 | 2026-10-09 | xuzhitu | 新增技能使用监测（SKILL.md 内嵌上报 + Claude Code hook 双路，跨工具兼容） |
