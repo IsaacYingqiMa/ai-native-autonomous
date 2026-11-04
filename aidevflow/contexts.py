@@ -10,6 +10,24 @@ from .runtimes import skills_root
 
 
 def role_context(root: Path, role: str) -> dict[str, Any]:
+    if role == "requirements_analyst":
+        from .discovery import Discovery
+        state, _, _ = Discovery(root).load()
+        if state["status"] not in ("collecting", "awaiting_answers", "review_ready"):
+            raise GateError("Requirements role requires editable Discovery")
+        task = (f"Read {state['request_snapshot_path']} and .aidevflow/schemas/requirements.schema.json. "
+                f"Read these Gate-recorded answers: {state.get('answers', [])}. "
+                "Return one complete requirements-v1 object with Intent, PRD, stable requirement and acceptance IDs, "
+                "sources and Given/When/Then scenarios. Do not invent user decisions; intent.decisions must be empty. "
+                "Keep unresolved material questions blocking. Incorporate actual recorded answers, never ask them again. "
+                'Do not implement, write files or claim approval. Native yield syntax: yield({"data": <complete object>}).')
+        if state.get("manifest_path"):
+            task += (f" Read the previous requirements manifest {state['manifest_path']} and its referenced requirements JSON. "
+                     "Preserve stable IDs and previously resolved scope unless actual recorded human feedback changes them. "
+                     "An earlier approval does not approve this revised output.")
+        return {"role": role, "execution_context": execution_context(state), "task_call": {
+            "context": "Read-only discovery; human approval is required before delivery.",
+            "tasks": [{"agent": "aidevflow-requirements-analyst", "task": task, "solutionSpace": "source-backed requirements only"}]}}
     gate = Gate(root)
     state, _, contract = gate._load_active()
     names = {value: key for key, value in ROLE_ALIASES.items()}
@@ -29,7 +47,7 @@ def role_context(root: Path, role: str) -> dict[str, Any]:
         task = (f"Read {state['request_snapshot_path']}, {state['intent_path']}, .aidevflow/contract.example.json "
                 "and .aidevflow/schemas/contract.schema.json. Inspect relevant business project context only. "
                 f"Use the assigned task_id {state['task_id']}. Available method assets live in {skills_root(root).relative_to(root).as_posix()}. "
-                "For zsspec use zsspec-managed-v1 with its complete Design/Build/Review stages, one cohesive work item for a small feature, "
+                "For the current zsspec-plan package use zsspec-managed-v2: Design req/plan/test, Build apply, Review test/done. Declare method.modules and method.acceptance_map from every canonical approved acceptance ID to native AC IDs; preserve canonical IDs exactly. If only the old des/task/chk/verify package is installed use the legacy example/profile without upgrading any existing run. Use one cohesive work item for a small feature, "
                 "work_plan_required=true, concrete test argv and required_checks covering all acceptance IDs. "
                 "Do not use an unavailable test runner. Return one complete Contract JSON via native yield; do not implement or write state. "
                 "specs/zsspec.yml and method assets are project setup inputs, never generated design artifacts. "
@@ -52,6 +70,10 @@ def role_context(root: Path, role: str) -> dict[str, Any]:
     task += (' Native completion syntax is yield({"data": <the complete output object>}). '
              'Do not put output fields directly at the top level of yield arguments; never submit {}. '
              'The runtime removes the data envelope before Gate registration.')
+    if state.get("requirements_ref") and role == "contract_planner":
+        task += (f" Read the approved requirements manifest {state['requirements_ref']['path']} and its PRD/scenarios. "
+                 f"Copy requirements_ref exactly into Contract: {state['requirements_ref']}. "
+                 "Preserve all approved acceptance IDs exactly; do not restart product clarification or change scope.")
     return {"schema": "aidevflow/role-context-v1", "role": role, "execution_context": execution_context(state),
             "task_call": {"context": f"AIDevFlow task {state['task_id']}. Gate owns state and acceptance; this role is read-only.",
                           "tasks": [{"agent": names[role], "task": task, "solutionSpace": "bounded by the immutable request and current Gate checkpoint"}]}}

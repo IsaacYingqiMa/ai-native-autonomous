@@ -45,7 +45,8 @@ def observe(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         raise GateError("Unsupported OMP observation event")
     with observer_lock(root / ".aidevflow"):
         gate = Gate(root)
-        state, run, _ = gate._load_active()
+        from .discovery import subject
+        state, run, _ = subject(root)
         if selected(root, state) != "omp":
             raise GateError("This task is pinned to a different runtime")
         path = run / "agent-invocations" / f"{ident}.json"
@@ -59,7 +60,9 @@ def observe(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
             if state.get("status") in ("needs_human", "archived", "delivery_ready", "delivery_ready_with_exceptions", "awaiting_user_input"):
                 raise GateError("OMP role dispatch is stopped by Gate state")
             role = ROLE_ALIASES[inp["agent"]]
-            if ((role == "intent_analyst" and state["current_stage"] != "intent")
+            if ((role == "requirements_analyst" and (state["current_stage"] != "discovery" or state["status"] not in ("collecting", "awaiting_answers", "review_ready")))
+                    or (role != "requirements_analyst" and state["current_stage"] == "discovery")
+                    or (role == "intent_analyst" and state["current_stage"] != "intent")
                     or (role == "contract_planner" and state.get("status") != "intent_approved")
                     or (role == "verifier" and state["current_stage"] != "verify")):
                 raise GateError("Critical role is not valid at this Gate checkpoint")
@@ -172,7 +175,8 @@ def recover(root: Path, session: str | None = None) -> dict[str, Any]:
 
 def _recover(root: Path, session: str | None) -> dict[str, Any]:
     from .gate import Gate, GateError, read_json
-    _, run, _ = Gate(root)._load_active()
+    from .discovery import subject
+    _, run, _ = subject(root)
     recovered = 0
     warnings = []
     latest: dict[str, dict[str, Any]] = {}
@@ -205,7 +209,8 @@ def _recover(root: Path, session: str | None) -> dict[str, Any]:
 
 def inspect_session(root: Path, session: str) -> dict[str, Any]:
     from .gate import Gate, read_json
-    _, run, _ = Gate(root)._load_active()
+    from .discovery import subject
+    _, run, _ = subject(root)
     events = [read_json(path)["payload"] for path in (run / "omp-observations").glob("*.json")]
     return {"session_id": session, "runtime": "omp", "events": [event for event in events if event.get("session_id") == session],
             "warnings": ["Only adapter-captured native observations are inspected; missing native output is not inferred."]}
@@ -218,7 +223,8 @@ def recover_branch(root: Path, session: str, entries: list[dict[str, Any]]) -> i
     The caller is the extension's read-only SessionManager, not a model tool.
     """
     from .gate import Gate, read_json
-    _, run, _ = Gate(root)._load_active()
+    from .discovery import subject
+    _, run, _ = subject(root)
     requests = {}
     recovered = 0
     for entry in entries:

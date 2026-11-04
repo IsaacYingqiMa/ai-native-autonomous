@@ -50,7 +50,7 @@ def writes(method):
 def observer_lock(control: Path, timeout: float = 5.0, *, name: str = "agent-observer.lock"):
     control.mkdir(parents=True, exist_ok=True)
     # Never unlink this file: that would allow two different lock objects.
-    if name not in ("agent-observer.lock", "gate-write.lock", "coordinator.lock", "event-log.lock"):
+    if name not in ("agent-observer.lock", "gate-write.lock", "coordinator.lock", "event-log.lock", "method-operation.lock"):
         raise ValueError("Unknown AIDevFlow lock name")
     with (control / name).open("a+b") as stream:
         stream.seek(0, os.SEEK_END)
@@ -70,7 +70,8 @@ def observer_lock(control: Path, timeout: float = 5.0, *, name: str = "agent-obs
                 break
             except OSError:
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("Agent observer lock timed out; retry observation/diagnostic")
+                    raise TimeoutError("Another native method worker is active; wait before retry/recovery" if name == "method-operation.lock"
+                                       else "Agent observer lock timed out; retry observation/diagnostic")
                 time.sleep(0.025)
         try:
             yield

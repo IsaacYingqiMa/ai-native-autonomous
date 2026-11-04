@@ -24,7 +24,8 @@ def guard(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     tool, inp = payload.get("toolName"), payload.get("input")
     if not isinstance(inp, dict):
         raise GateError("Tool input must be an object")
-    active = (root / ".aidevflow/active-run.json").is_file()
+    discovering = (root / ".aidevflow/active-discovery.json").is_file()
+    active = (root / ".aidevflow/active-run.json").is_file() or discovering
     role = (payload.get("actor") or {}).get("name")
     if active and selected(root) != "omp":
         return {"block": True, "reason": "Active task belongs to another runtime; resume it there"}
@@ -39,6 +40,8 @@ def guard(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 return {"block": True, "reason": "Verifier may read only its frozen evidence bundle"}
     if tool in READ_TOOLS or tool == "yield":
         return {"block": False}
+    if discovering and tool not in {"bash", "task"}:
+        return {"block": True, "reason": "Discovery permits read-only investigation and Gate-owned draft persistence"}
     if not active:
         # Framework protection applies even before a business task exists.
         if tool not in {"edit", "apply_patch", "write", "notebook", "bash"}:
@@ -95,9 +98,29 @@ def guard(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
 
 def dispatch(root: Path, action: str, payload: dict[str, Any]) -> Any:
     gate = Gate(root)
+    if action in ("flow-enter", "review-prepare", "review-respond"):
+        from .workflow import Workflow
+        workflow = Workflow(root)
+        if action == "flow-enter":
+            return workflow.enter(payload.get("text", ""), payload.get("discussion_only", False), payload.get("approved_action", ""))
+        if action == "review-prepare":
+            return workflow.prepare_review(payload["session_id"])
+        return workflow.respond(payload["discovery_id"], payload["token"], payload["session_id"], payload["choice"], payload.get("feedback", ""))
+    if action == "discovery-approve":
+        from .discovery import Discovery
+        return Discovery(root).approve(payload["id"], payload["revision"], payload["sha256"],
+                                       "omp user", payload["utterance"], "native_user_command")
+    if action == "method-accept":
+        from .method_execution import execute
+        return execute(root, "close", payload["module"], by="omp user", utterance=payload["utterance"])
     if action == "ping":
         return {"protocol": 1, "runtime": selected(root), "python": sys.executable}
     if action == "status":
+        if (root / ".aidevflow/discovery-handoff.json").exists():
+            return {"status": "handoff_pending", "next_action": "discovery-start-delivery"}
+        if (root / ".aidevflow/active-discovery.json").is_file():
+            from .discovery import Discovery
+            return Discovery(root).load()[0]
         if not gate.active_path.is_file():
             return {"active_run": None}
         from .method_resources import managed_context
@@ -130,8 +153,10 @@ def dispatch(root: Path, action: str, payload: dict[str, Any]) -> Any:
         from .omp import observe
         return observe(root, payload)
     if action == "recover":
+        if (root / ".aidevflow/discovery-handoff.json").exists():
+            return {"recovered_events": 0, "warnings": ["Recover the interrupted handoff with discovery-start-delivery before dispatching roles"]}
         from .runtimes import recover
-        if not gate.active_path.is_file():
+        if not gate.active_path.is_file() and not (root / ".aidevflow/active-discovery.json").is_file():
             return {"recovered_events": 0}
         result = recover(root)
         if selected(root) == "omp" and payload.get("entries"):
@@ -177,9 +202,9 @@ def _serve(root: Path, leases: list[Any]) -> int:
             payload = request.get("payload", {})
             if not isinstance(payload, dict):
                 raise GateError("Bridge payload must be an object")
-            if (not leases and request.get("action") in ("guard", "observe")
+            if (not leases and request.get("action") in ("guard", "observe", "flow-enter", "review-prepare", "review-respond")
                     and payload.get("actor", {}).get("kind") == "main"
-                    and (root / ".aidevflow/active-run.json").is_file()):
+                    and (request.get("action") == "flow-enter" or (root / ".aidevflow/active-run.json").is_file() or (root / ".aidevflow/active-discovery.json").is_file())):
                 from .locking import observer_lock
                 lease = observer_lock(root / ".aidevflow", timeout=0, name="coordinator.lock")
                 lease.__enter__()

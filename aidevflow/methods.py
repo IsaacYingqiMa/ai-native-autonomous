@@ -7,8 +7,8 @@ from typing import Any
 
 
 def skill_path(root: Path, name: str) -> Path:
-    from .runtimes import skills_root
-    directory = skills_root(root)
+    from .method_resolution import source_for
+    directory = source_for(root)
     path = (directory / name / "SKILL.md").resolve()
     path.relative_to(directory)
     return path
@@ -35,6 +35,15 @@ def available_skill_errors(root: Path, contract: dict[str, Any]) -> list[str]:
         for name in ("zsspec-standard", "zsspec-change"):
             if not skill_path(root, name).is_file():
                 errors.append(f"managed method support skill {name!r} is not installed")
+    from .method_registry import adapter_for
+    adapter = adapter_for(contract)
+    if adapter:
+        from .gate import GateError
+        from .method_resolution import source_for
+        try:
+            adapter.describe(source_for(root, contract))
+        except (GateError, ValueError, OSError, SyntaxError) as exc:
+            errors.append(str(exc))
     return errors
 
 

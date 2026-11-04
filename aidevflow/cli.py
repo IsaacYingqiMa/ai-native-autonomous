@@ -23,6 +23,26 @@ def build_parser() -> argparse.ArgumentParser:
     install = sub.add_parser("install", help="install AIDevFlow and a native coding-agent adapter")
     install.add_argument("--runtime", choices=("omp", "claude-code"), default="omp")
     install.add_argument("--skills-root", help="project-local method root; auto discovers .omp/skills or .claude/skills")
+    install.add_argument("--workflow-profile", choices=("legacy", "reviewed-discovery-v1"))
+    discovery = sub.add_parser("discovery-create", help="start read-only Intent/PRD preparation")
+    discovery.add_argument("--request", required=True)
+    sub.add_parser("discovery-status", help="show requirements review state")
+    discovery = sub.add_parser("discovery-record", help="record a native requirements analyst result")
+    discovery.add_argument("--draft", required=True)
+    discovery = sub.add_parser("discovery-answer", help="record an actual user answer")
+    discovery.add_argument("--question-id", required=True)
+    discovery.add_argument("--text", required=True)
+    discovery = sub.add_parser("discovery-revise", help="reopen requirements preparation")
+    discovery.add_argument("--reason", required=True)
+    discovery = sub.add_parser("discovery-cancel", help="cancel requirements preparation while retaining its history")
+    discovery.add_argument("--reason", required=True)
+    discovery = sub.add_parser("discovery-approve", help="approve an exact requirements revision")
+    discovery.add_argument("--id", required=True)
+    discovery.add_argument("--revision", required=True, type=int)
+    discovery.add_argument("--sha256", required=True)
+    discovery.add_argument("--by", required=True)
+    discovery.add_argument("--utterance", required=True)
+    sub.add_parser("discovery-start-delivery", help="start or recover approved delivery")
 
     init = sub.add_parser("init", help="start one workflow run")
     init.add_argument("--task-id", required=True)
@@ -37,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="show active workflow state")
     status.add_argument("--summary", action="store_true", help="skip candidate hashing; never use as evidence of acceptance")
     context = sub.add_parser("role-context", help="prepare a read-only native role assignment from the current Gate checkpoint")
-    context.add_argument("--role", choices=("intent_analyst", "contract_planner", "verifier"), required=True)
+    context.add_argument("--role", choices=("intent_analyst", "requirements_analyst", "contract_planner", "verifier"), required=True)
     doctor = sub.add_parser("doctor", help="read-only runtime preflight; does not dispatch agents")
     doctor.add_argument("--session-id", help="inspect native transcript capabilities without importing observations")
     recover = sub.add_parser("recover-runtime", help="recover actual native role results lost to cancelled/missing Hooks")
@@ -45,6 +65,18 @@ def build_parser() -> argparse.ArgumentParser:
     continuation = sub.add_parser("continuation", help="select one owner of turn continuation; never accepts business work")
     continuation.add_argument("--owner", required=True, choices=("native", "bounded_stop", "manual"))
     sub.add_parser("sync-projections", help="project Gate state into registered generated-document status cells")
+    sub.add_parser("method-inspect", help="discover/cache a candidate method description; never activates a task")
+    method = sub.add_parser("method-run", help="run the task's pinned method on staged specs")
+    method.add_argument("operation", choices=("status", "verify", "gate", "baseline", "report", "sync"))
+    method.add_argument("--module")
+    method.add_argument("--scope", choices=("req", "des", "task", "chk"))
+    method.add_argument("--evidence", nargs="*", default=[])
+    method = sub.add_parser("method-recover", help="recover an interrupted method transaction")
+    method.add_argument("--mode", choices=("finish", "rollback"), required=True)
+    method = sub.add_parser("method-accept", help="operator business acceptance after verified delivery")
+    method.add_argument("--module", required=True)
+    method.add_argument("--by", required=True)
+    method.add_argument("--utterance", required=True)
     resume = sub.add_parser("resume-run", help="resume human handling only after an explicit user instruction")
     resume.add_argument("--by", required=True)
     resume.add_argument("--utterance", required=True)
@@ -159,7 +191,26 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command == "install":
             from .installer import install
             source_root = Path(__file__).resolve().parents[1]
-            result = install(source_root, Path(args.root), runtime=args.runtime, skills_root=args.skills_root)
+            result = install(source_root, Path(args.root), runtime=args.runtime, skills_root=args.skills_root, workflow_profile=args.workflow_profile)
+        elif args.command.startswith("discovery-"):
+            from .discovery import Discovery
+            discovery = Discovery(Path(args.root))
+            if args.command == "discovery-create":
+                result = discovery.create(args.request)
+            elif args.command == "discovery-status":
+                result = discovery.load()[0]
+            elif args.command == "discovery-record":
+                result = discovery.record(args.draft)
+            elif args.command == "discovery-answer":
+                result = discovery.answer(args.question_id, args.text)
+            elif args.command == "discovery-revise":
+                result = discovery.revise(args.reason)
+            elif args.command == "discovery-cancel":
+                result = discovery.cancel(args.reason)
+            elif args.command == "discovery-approve":
+                result = discovery.approve(args.id, args.revision, args.sha256, args.by, args.utterance)
+            else:
+                result = discovery.start_delivery()
         elif args.command == "init":
             result = gate.init(args.task_id, args.contract)
         elif args.command == "start-intake":
@@ -167,7 +218,11 @@ def _main(argv: list[str] | None = None) -> int:
         elif args.command == "register-contract":
             result = gate.register_contract(args.draft)
         elif args.command == "status":
-            result = gate.status(summary=args.summary)
+            if (gate.control / "active-discovery.json").is_file():
+                from .discovery import Discovery
+                result = Discovery(Path(args.root)).load()[0]
+            else:
+                result = gate.status(summary=args.summary)
         elif args.command == "role-context":
             from .contexts import role_context
             result = role_context(Path(args.root).resolve(), args.role)
@@ -189,6 +244,18 @@ def _main(argv: list[str] | None = None) -> int:
         elif args.command == "continuation":
             from .continuation import set_owner
             result = set_owner(Path(args.root), args.owner)
+        elif args.command == "method-inspect":
+            from .method_resolution import discover
+            result = discover(Path(args.root).resolve())
+        elif args.command == "method-run":
+            from .method_execution import execute
+            result = execute(Path(args.root), args.operation, args.module, args.scope, args.evidence)
+        elif args.command == "method-recover":
+            from .method_execution import recover
+            result = recover(Path(args.root), args.mode)
+        elif args.command == "method-accept":
+            from .method_execution import execute
+            result = execute(Path(args.root), "close", args.module, by=args.by, utterance=args.utterance)
         elif args.command == "sync-projections":
             result = gate.sync_projections()
         elif args.command == "resume-run":
@@ -278,7 +345,10 @@ def _main(argv: list[str] | None = None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.command in ("doctor", "status", "role-context", "diagnose-evidence", "install"):
+    if args.command in ("doctor", "status", "discovery-status", "role-context", "diagnose-evidence", "install",
+                        "method-inspect", "method-run", "method-recover", "method-accept", "sync-projections"):
+        # Scripted operations own short prepare/commit locks and an independent
+        # worker lease; an outer writer lock would cover the whole subprocess.
         return _main(argv)
     from .locking import writer_lock
     try:

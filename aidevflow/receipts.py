@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 ROLE_ALIASES = {
+    "aidevflow-requirements-analyst": "requirements_analyst",
     "aidevflow-intent-analyst": "intent_analyst",
     "aidevflow-contract-planner": "contract_planner",
     "aidevflow-independent-verifier": "verifier",
@@ -18,10 +19,15 @@ ROLE_ALIASES = {
 def execution_context(state: dict[str, Any]) -> dict[str, Any]:
     """Business inputs fixed when a role is dispatched, independent of Claude."""
     bundle = state.get("verifier_bundle") or {}
-    return {"stage": state.get("current_stage"), "evidence_epoch": state.get("evidence_epoch", 0),
+    context = {"stage": state.get("current_stage"), "evidence_epoch": state.get("evidence_epoch", 0),
             "request_sha256": state.get("request_sha256"), "intent_sha256": state.get("intent_sha256"),
             "contract_sha256": state.get("contract_sha256"),
             "bundle_sha256": bundle.get("sha256"), "candidate_sha256": bundle.get("candidate_sha256")}
+    if state.get("current_stage") == "discovery":
+        context.update(discovery_id=state["task_id"], discovery_revision=state["revision"])
+    if state.get("requirements_ref"):
+        context["requirements_ref"] = state["requirements_ref"]
+    return context
 
 
 def completed_results(entries: list[dict[str, Any]], role: str, digest: str,

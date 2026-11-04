@@ -57,7 +57,7 @@ export class Bridge {
         this.pending.delete(id);
         reject(new Error("AIDevFlow request timed out; execution status is unknown, inspect before retrying"));
         this.close();
-      }, 15000);
+      }, action === "method-accept" ? 45000 : 15000);
       this.pending.set(id, { resolve, reject, timer });
       this.child!.stdin.write(frame, "utf8", error => { if (error) this.fail(error); });
     });

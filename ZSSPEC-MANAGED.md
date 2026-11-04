@@ -1,164 +1,103 @@
-# 新版 zsspec 与 AIDevFlow 的串行托管使用说明
+# 当前 zsspec 的 AIDevFlow 托管适配
 
-2026-10-27 Observer B2 补充：新建自主任务以真实产物审查作为方法门槛，Skill 观察缺失只作诊断；五阶段、方法调用顺序、测试冻结和独立验收仍需执行。具体执行恢复、续跑限制和重新安装方式见 [运行兼容性指南](RUNTIME-COMPATIBILITY.md)。旧任务保留原门槛。
+本版本适配含 `zsspec-plan` 和 `zsspec-standard/scripts/zsspec_check.py` 的当前方法包。新任务使用 **zsspec-managed-v2**。zsspec 原始技能、脚本和 README 不作修改；旧的 zsspec-managed-v1 任务保留原规则，见 [旧版说明](ZSSPEC-MANAGED-LEGACY.md)。不按 README 的版本字符串猜测兼容性。
 
-本次适配针对当前 zsspec 完整技能包 v1.4。采用用户确认的两项策略：普通文档定稿和测试代码由协调 Agent 审查后继续，明确记录为 AI 审查；验收测试仍在 Design 准备和冻结，Build 不自动修改冻结测试。五阶段保持 Intent → Design → Build → Verify → delivery_ready。
+## 责任与流程
 
-版本口径按技能包维护者确认统一：
+用户讨论并批准 Intent/PRD → AI 审查设计与测试 → 自主实现和修复 → 独立验证 → delivery_ready → 用户业务验收。
 
-- **v1.4**：zsspec 完整技能包版本。
-- **v1.18**：技能包自带 README 的文档版本；其中原有版本字样保留，不作为完整技能包版本依据。
-- **zsspec-managed-v1**：AIDevFlow 托管执行规则的第一版，与上述两个版本独立。运行时按实际方法资产和配置校验，不根据 README 版本号放行。
+- AIDevFlow 管理需求批准、执行状态、冻结基线、工作项、证据、修复预算与交付门禁。
+- zsspec 提供 req → plan（DES/TASK/CHK）→ apply → test → done 的工程方法。
+- 普通设计定稿和测试代码审查由 AI 承担，必须留存实际审查证据。不得称为“人工已确认”。
+- 重大需求、接口、验收、权限与风险变化，以及最终业务验收、发布授权由人决定。
+- OMP /goal 或 bounded_stop 只能选一个续跑所有者；它们都不能替代 Gate 的业务门禁。
 
-本说明不修改 zsspec 方法资产、其 README 或内部反馈示例的版本字段。
+## 新任务如何使用
 
-## 适配范围
+先在独立业务项目准备完整的当前方法包、Python/Git、OMP 模型和业务依赖。不要删除旧任务依赖的方法包。安装器只更新 AIDevFlow，不安装或改写 zsspec。
 
-- 新任务 Contract 选择 `method.profile: zsspec-managed-v1`。不自动升级旧 Contract、旧任务或旧验收规则。
-- Design：req → des → task → chk → verify → test（适用的 `--auto --gen-only`）。Build：apply。Review：test → done。
-- 由 TASK 的真实工作分解生成 Work Plan，Gate 管理进度并投影到表格。原始需求、Intent 与 Contract 是边界；REQ 不得重新发明需求。
-- 配置采用 strict、项目级 `.claude/skills`、串行。zsspec.yml 原有 parallel:auto 不会被重写，但本次有效策略为 off；Gate 同时只允许一个工作项进行中。文档/审查子代理串行由协调指令约束，本版不是通用并行调度器。
-- 执行测试仍由 Gate 捕获。static/manual 新增独立证据登记，明确标为 AI 协调者声明，不冒充命令执行或人工批准。
-- 新版 zsspec 的使用上报、feedback、维护侧 doctor 不属于业务验收链路。本次没有执行这些上报脚本。
+```powershell
+python -B D:\Tools\ai-native-autonomous\scripts\aidevflow.py --root D:\Work\my-project install --runtime omp --skills-root .omp/skills --workflow-profile reviewed-discovery-v1
+```
 
-## 升级与准备
-
-先结束项目中仍在执行的 Claude 会话与子代理，再更新框架。不要清除历史任务。安装方式沿用 [兼容性教程](CLAUDE-COMPATIBILITY.md)。本次代码只修改框架源项目，没有安装到其他业务项目。
-
-业务项目需要完整的新版 zsspec 方法资产；AIDevFlow 安装器不会替你覆盖或迁移这些资产。按供应方分发规则包含 `.skillhub` 与 `zsspec-test/reference`、`zsspec-standard` 模板，排除维护专用 `zsspec-doctor`。旧任务仍依赖旧入口时，应先合法结束旧任务，或在独立测试项目验证新版，不直接删除旧方法后强行继续旧 Contract。
-
-在业务项目根运行：
+在业务项目根检查：
 
 ```powershell
 python scripts/aidevflow.py doctor
-python scripts/aidevflow.py status
+python scripts/aidevflow.py method-inspect
 ```
 
-doctor 新增 method_errors 与 method_policy。它检查实际入口和配置，不能证明浏览器 MCP、服务或业务检查可用。未安装方法包时会报告缺失，不再用“Skill 数量大于零”代表兼容。
-
-配置示例：
-
-```yaml
-paths:
-  skills_root: auto
-test:
-  e2e: enabled
-  manual: enabled
-parallel:
-  mode: off
-  max: 1
-gate:
-  mode: strict
-```
-
-为保持 Python 无第三方依赖，本版只解析上面这种两层标量映射（支持注释和简单引号）；不支持 YAML 锚点、数组、花括号映射、多行值。遇到不支持的语法会报错，绝不悄悄忽略。quick、全局/自定义方法根暂不支持。禁用某种测试不能消除 Contract 中的验收义务；有冲突应在登记 Contract 前解决。
-
-## 正常使用
-
-在已配置的 Claude 项目中输入：
+重新启动 OMP，然后使用同一个入口：
 
 ```text
-/aidevflow-flow
-
-使用新版 zsspec-managed-v1 完成本次任务。先查看 doctor 和 status。
-普通产物由协调 Agent 审查，如实登记为 AI 审查，不重复要求人工确认。
-有活动任务时先按其原有 Contract 继续，不自动升级或新建。
-新任务串行执行，验收测试在 Design 准备、审查并冻结。
-范围、风险、验收变化和冻结测试缺陷返回我处理。
-需求如下：……
+/aidevflow-flow 说明目标、使用者、现有文档、约束和验收期望
 ```
 
-多数命令应由协调 Agent 执行。用户主要提供真实需求和关键选择，不需手写 Contract 或手工修改状态。
+在原生确认界面审阅 Intent、PRD 和场景，选择确认并开始自主开发。仅保存需求后，直接 `/aidevflow-flow` 即可继续。已批准后携带长文字调用 flow，会让你选择“继续已批准需求”或“修改需求并重新审阅”，避免一句续跑指令被当作需求修改。明确要修改需求时用 `/aidevflow-discover 修改意见`。
 
-### Contract
+后续常规操作由协调 Agent 执行。用户无需逐条手动运行下文内部命令。
 
-参考 `.aidevflow/contract.example.json`，重点是：
+## 新 Contract 与映射
+
+方法阶段固定为 Design=req/plan/test，Build=apply，Review=test/done。额外声明：
 
 ```json
-{
-  "method": {
-    "name": "zsspec",
-    "profile": "zsspec-managed-v1",
-    "stages": {
-      "design": ["zsspec-req", "zsspec-des", "zsspec-task", "zsspec-chk", "zsspec-verify", "zsspec-test"],
-      "build": ["zsspec-apply"],
-      "review": ["zsspec-test", "zsspec-done"]
-    }
-  },
-  "evidence_paths": ["specs/checklist/reports", "test-results", "playwright-report"]
+"method": {
+  "name": "zsspec",
+  "profile": "zsspec-managed-v2",
+  "modules": ["feature"],
+  "acceptance_map": {"ACCEPT-1": ["AC-feature-value-one"]},
+  "stages": {
+    "design": ["zsspec-req", "zsspec-plan", "zsspec-test"],
+    "build": ["zsspec-apply"],
+    "review": ["zsspec-test", "zsspec-done"]
+  }
 }
 ```
 
-这是字段示例，不是可直接登记的完整 Contract。完整示例仍需按项目填写命令、代码路径、设计产物、测试和验收标准。
+已批准的验收 ID（如 ACCEPT-1）保持不变，acceptance_map 映射到 zsspec 的原生 AC ID。全体原生 AC 必须被准确覆盖，不能靠数量匹配。REQ 一行承接多个 AC 不需要重复表格行。
 
-检查项分两类：
+协调者从真实 TASK 派生 Work Plan；所有 TASK/CHK 行分别映射到 Gate 的 work_item/required_check。REQ 总览每行登记一次 acceptance 投影，其 source_id 选择该行包含的一项规范验收 ID；全体验收覆盖由 acceptance_map 判断，不要求每项验收独占一行 REQ。参照 `.aidevflow/contract.example.json`、`work-plan.example.json` 和公开 schema。
 
-```json
-[
-  {"id":"CHECK-e2e","suite":"e2e","mode":"auto","acceptance_items":["REQ-功能"]},
-  {"id":"CHECK-static","kind":"static","acceptance_items":["REQ-功能"]},
-  {"id":"CHECK-ui","kind":"manual","acceptance_items":["REQ-功能"]}
-]
-```
+## 自主工程链路
 
-命令项在 test_commands 定义实际 argv。static/manual 不填写 suite/target，必须通过 record-check 登记证据。每个验收项应有充分覆盖；至少声明一个 static 检查。不要用 static 代替必须运行的 UI/HTTP 行为。
+1. req 消费已批准需求，不重新发明范围。plan 按 des/task/chk 阶段生成四层文档；实际 AI 审查后，通过 `method-run baseline --module feature --scope req --evidence <review.md>` 逐层定稿，scope 依次 req、des、task、chk。
+2. Design 内准备所有验收测试和测试支持文件。适用时使用 test --auto --gen-only。注册 Work Plan 后，对每个模块执行 `method-run verify --module feature` 与 `method-run gate --module feature`。缺失断言的旧格式不能冒充开工放行。
+3. 留下最终设计/测试 AI 审查报告并 record-design-review，freeze-tests，取得有效 Red，advance --to build。服务没启动、依赖缺失不算有效 Red。
+4. apply 实现；通过 Gate 开始、完成或重开工作项。工作项/检查变化后执行 sync-projections。只允许适配器调用原生 set，同步不会改写设计或验收语义。
+5. 通过 run-tests 执行真实检查。静态和人工辅助检查使用实际报告、截图和当前候选摘要 record-check。缺失、失败、过期或无效证据不能通过。失败按 Gate 规则修复并重新收集证据。
+6. done 用于检查收尾问题，此时不执行其直接 close。prepare-verifier 生成包含方法策略、固定源文件、原生执行记录和审查证据的包，交给独立 Verifier；record-verdict 后才允许 advance --to delivery_ready。
+7. 用户实际业务验收后输入 `/aidevflow-accept feature`。也可在操作者终端执行 `method-accept --module feature --by <姓名> --utterance <实际验收指令>`。适配器通过原生 close 更新 REQ；AI shell 不能代替用户执行该授权。原生生成的索引保存在操作证据中，不覆盖共享的实时 specs/index.md。发布仍需另外授权。
 
-evidence_paths 是专用运行输出目录，不是额外业务写权限。不能与代码、规格或冻结测试重叠。其内容不参与候选代码摘要，只有登记时捕获的不可变快照进入证据链，避免测试生成报告导致自己失效。不能把实现或依赖放在这些目录。
+原生 TASK 状态只能单向完成。重开已完成的修复工作时，Gate 仍保持工作项进行中，并记录原生状态无法回退的原因；原生文档的“已完成”绝不能让 Gate 跳过修复。
 
-### Design 审查与冻结
+## 隔离、版本与恢复
 
-完成四类规格、必要测试代码、TASK 到 Work Plan 的登记后，协调者先检查覆盖、断链和测试断言，把实际检查发现与处理写入报告，然后：
+方法发现只在准备阶段生成缓存，不授权执行所有 zsspec-*。执行适配器是 AIDevFlow 自带代码，不加载供应方任意插件。Contract 固定方法描述、适配器 API、配置和完整使用源文件。OMP 的受管读取会重定向到任务源快照，外部方法包更新不会切换其运行流程。Claude 原生 Skill 加载器尚无相同的读取重定向，因此保留保守策略：安装源改变就触发完整性阻断；它不承诺 OMP 的运行中更新隔离。未知协议停止适配评估，不让 AI 临时发明新的执行规则。
 
-```powershell
-python scripts/aidevflow.py record-design-review --reviewer "Claude coordinator" --reason "已检查规格覆盖与可执行测试断言，报告记录结论" --evidence specs/checklist/reports/design/review.md
-python scripts/aidevflow.py freeze-tests
-```
+原生脚本在复制的 specs 上执行，固定操作、模块、输入摘要、脚本摘要和审查证据。提交前再次验证状态版本与文件；冲突时不覆盖新编辑。脚本执行期间释放 Gate 写锁，另设工作进程锁阻止运行未结束时被恢复命令抢占。这是可信本地脚本的暂存机制，不是操作系统沙箱。
 
-Gate 记录审查时的规格、测试和计划摘要。审查后又改了内容，必须重新审查。没有审查记录不能冻结。记录写明 ai_coordinator_attestation，不表示人工确认，也不能自动证明模型审查质量。
-
-随后按 Contract 收集有效 Red，并进入 Build。可执行测试列入 test_files；POM、fixture、配置等辅助文件列入 test_support_files。两者一同冻结，辅助文件不会被伪装成单独的 Green 测试目标。red_test_files 仅列需要证明新增行为缺失的测试，不能强迫所有回归和辅助文件失败。目标服务不可达不等于有效 Red。
-
-### Build 的运行与证据
-
-命令检查：
+中断后不要编辑状态文件。先确认原工作进程已退出，再：
 
 ```powershell
-python scripts/aidevflow.py run-tests --suite e2e --evidence test-results/result.json test-results/screenshot.png
+python scripts/aidevflow.py method-recover --mode finish
+# 若只有未完成的暂存，或决定取消尚未提交的操作：
+python scripts/aidevflow.py method-recover --mode rollback
 ```
 
-报告/截图须在命令结束后存在且非空，路径须属于 evidence_paths；建议预先约定本轮输出目录。Gate 保存实际退出码和 stdout/stderr，并复制文件快照。文件存在不代表功能通过；命令结果、报告含义和独立验收共同决定。
-
-static/manual：先取 status 中的 candidate_sha256，针对这个版本执行审查或浏览器检查，再登记：
-
-```powershell
-python scripts/aidevflow.py record-check --id CHECK-static --result passed --candidate <检查前取得的SHA> --reviewer "Claude coordinator" --reason "报告中无阻断发现" --evidence specs/checklist/reports/static/review.md
-python scripts/aidevflow.py record-check --id CHECK-ui --result passed --candidate <检查前取得的SHA> --reviewer "Claude coordinator" --reason "按步骤完成界面检查，截图支持结论" --evidence specs/checklist/reports/ui/review.md specs/checklist/reports/ui/screen.png
-```
-
-尖括号是占位符，不直接执行。失败用 failed，缺条件用 blocked，非 passed 返回非零。manual 的 passed 至少要有截图；主观审美或真实外部系统缺条件仍应阻塞。Gate 校验检查项、候选版本、文件完整性和时效，不凭截图扩展名证明操作真实发生；独立 Verifier 仍需审核证据实质。
-
-status.pending_checks 只列需要运行的命令；pending_attestations 列 static/manual 的缺失、失败、过期或损坏记录。Skill 加载成功不等于模式执行完成。代码变化后即使 CHK 文本没变，旧证据仍过期。不要把“已通过且清单未变就跳过”的原生规则直接套在托管任务上。
-
-TASK/CHK 状态由 Gate 投影。manual 通过显示 AI辅助；报告里保留来源、日期与截图。done 只做方法层收口，不能提前标记最终 REQ 完成，也不要求一个尚未生成的最终 Verifier verdict。通过独立验收后 Gate 再投影 REQ 完成状态。
-
-## 失败与恢复
-
-- 实现缺陷：走 Gate route，重开受影响工作项，修复并重新取证。
-- 冻结测试缺陷：暂停处理基线，不自动更改选择器、断言或重算哈希。
-- 规格/计划变化：不能通过 zsspec-change 直接修改冻结内容。本版仍需明确的新基线处理。
-- 配置或方法资源变化：固定策略与方法包摘要会检测到，包括 test/reference 和 standard 模板；不静默切换到新策略。
-- 报告源文件后来覆盖：已捕获的快照保留原内容；要登记新结果必须重新检查。历史失败不会被删除，最新有效结果用于当前检查状态。
-- 证据快照被修改：标为 invalid，不能进入独立验收。
-- 旧合同：不添加 profile、不制造旧方法观测、不强行套新审查门禁。
+finish 只完成已验证事务；rollback 拒绝覆盖后来的编辑。已经写入 Gate 的事务只能完成收尾，不能无声回滚。冻结规格/测试的实质变化走原有人工授权的 baseline revision，不能借原生 baseline 命令重新批准。
 
 ## 验证边界
 
-框架回归与托管流程测试验证配置、阶段门禁、时效、证据保存和打包。它们不代表完成了一次真实 zsspec 自主业务开发，也不证明浏览器实测或首次交付合格率已提高。正式使用前，建议在隔离业务副本跑一个真实小功能，检查 Gate delivery_ready、有效 verdict 与真实功能结果。
+自动化集成测试使用本仓库的真实 zsspec 脚本验证定稿、门禁、状态同步、技术交付、操作者验收、版本隔离和事务恢复；集成样例使用真实 unittest 断言产生 Red/Green，Verifier 回执与 AI 审查报告使用明确标识的协议测试数据。真实 OMP RPC 检查覆盖命令加载和审查界面往返，不调用模型。它们不能证明复杂企业项目能自动完成某个百分比；推广前仍需真实模型与代表性业务项目的完整试点。
 
-### 2026-10-27 实际验证记录
+## 2026-11-03 源码验证记录
 
-- 最终完整回归：`python -B -m unittest discover -s tests -v`，101 项全部通过，313.067 秒；含原有 70 项与本轮新增 31 项。
-- 包含新配置校验、Intake 角色回执衔接、AI 设计审查、测试辅助文件冻结、串行工作项、命令/声明隔离、过期与篡改拦截、缺失/旧报告拒绝、截图打包和原有真实本地 HTTP 检查。
-- 隔离安装使用真实当前方法包（12 个业务 Skill，不包含维护 doctor）；安装后的 CLI doctor 通过，method_errors 为空，耗时约 3.24 秒。记录保留在 `.test-tmp/managed-install-64ub1ll6/smoke-result.json`。
-- 验证中修复了 Windows 短暂文件占用导致的原子替换失败（有上限重试），以及 cmd 版本探测遗留子进程可能拖住输出管道的问题（原生探测、文件输出、有限等待）。永久错误继续报错。
-- 未调用模型或上报脚本，未安装到 zdata-agent-starter，未修改其任务记录。没有运行一次真实的新版 zsspec 自主业务开发或浏览器验收。
+- Python 全量回归：235 项，233 通过、2 跳过。跳过项需要准备 Python Playwright/浏览器解释器；不计为浏览器验收通过。逐项日志保存在本机 `.test-tmp/zsspec-v2-regression.log`。
+- 随后的快照读取与候选隔离收尾改动，重新执行最新方法适配专项：14 项全部通过；包括 Git 跟踪的方法文件/README 更新隔离、Claude 保守阻断、真实行为 Red/Green、独立验证协议到用户收口、部分提交恢复、并发冲突与冻结修订。
+- OMP 扩展：39 项通过；真实原生命令发现通过，真实审查窗口往返与持久暂停通过。
+- Stop 后延迟 35 秒再选择的真实 RPC 审查探针通过；Stop 在人工响应前返回，没有触发模型调用。
+- Python 源码语法与 Git diff 空白检查通过。本轮没有调用真实模型做完整业务演练，也没有替业务项目安装或迁移。
+- 原生脚本的仓库自测依赖分发中未包含的 fixtures，因此未将供应方 selftest 列为通过项；集成测试使用本仓库生成的明确样例执行实际原生脚本。
+
+后续兼容策略：保持协议的模板/说明变化可重新发现并用于新任务；协议、状态机或原生解析结构变化仍需更新内置适配器。不能把“发现了 zsspec-*”当作任意未来版本都已兼容。

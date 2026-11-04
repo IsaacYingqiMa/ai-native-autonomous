@@ -30,7 +30,7 @@ def main() -> int:
         root = Path(directory).resolve()
         root.relative_to(base.resolve())  # Validate the recursive cleanup boundary.
         subprocess.run(["git", "-c", "core.fsmonitor=false", "init", "-q"], cwd=root, check=True, capture_output=True)
-        install(SOURCE, root, runtime="omp")
+        install(SOURCE, root, runtime="omp", workflow_profile="reviewed-discovery-v1")
         process = subprocess.Popen([executable, "--cwd", str(root), "--mode", "rpc", "--no-ui",
                                     "--no-title", "--no-context-files", "--no-rules", "--no-lsp"],
                                    cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -67,7 +67,7 @@ def main() -> int:
                     process.stdin.flush()
                 if frame.get("id") == "aidevflow-probe":
                     commands = {command.get("name") for command in frame.get("data", {}).get("commands", [])}
-                    discovered = frame.get("success") is True and {"aidevflow-flow", "aidevflow-doctor", "skill:aidevflow-flow"} <= commands
+                    discovered = frame.get("success") is True and {"aidevflow-flow", "aidevflow-doctor", "aidevflow-discover", "aidevflow-approve", "aidevflow-accept", "skill:aidevflow-flow"} <= commands
                     break
             process.stdin.close()
             try:

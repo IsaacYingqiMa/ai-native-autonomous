@@ -152,13 +152,15 @@ def doctor(root: Path) -> dict[str, Any]:
 
 
 def doctor_omp(root: Path) -> dict[str, Any]:
-    from .gate import Gate, read_json, sha256_file
+    from .gate import Gate, GateError, read_json, sha256_file
     from .runtimes import identity, skills_root, project_config
     from .method_resources import source_status
     root = root.resolve()
     missing = [rel for rel in (".omp/extensions/aidevflow/index.ts", ".omp/extensions/aidevflow/client.ts",
                               "scripts/aidevflow_bridge.py", ".omp/skills/aidevflow-flow/SKILL.md") if not (root / rel).is_file()]
     roles = [f".omp/agents/aidevflow-{role}.md" for role in ("intent-analyst", "contract-planner", "independent-verifier")]
+    if project_config(root).get("workflow_profile") == "reviewed-discovery-v1":
+        roles.append(".omp/agents/aidevflow-requirements-analyst.md")
     absent_roles = [rel for rel in roles if not (root / rel).is_file()]
     manifest_path = root / ".aidevflow/runtime-manifest.json"
     mismatch, drift = [], []
@@ -175,7 +177,7 @@ def doctor_omp(root: Path) -> dict[str, Any]:
         mismatch.append(".aidevflow/runtime-manifest.json")
     gate = Gate(root)
     state, contract = None, None
-    if gate.active_path.is_file():
+    if gate.active_path.is_file() and not (root / ".aidevflow/discovery-handoff.json").exists():
         state, _, contract = gate._load_active()
     example = root / ".aidevflow/contract.example.json"
     if contract is None and example.is_file():
@@ -198,6 +200,15 @@ def doctor_omp(root: Path) -> dict[str, Any]:
     if sources["maintenance_skills"]:
         warnings.append("Maintenance-only zsspec-doctor is present; exclude it from business distributions. Managed method loading blocks it")
     settings_errors = []
+    discovery_state = None
+    if (root / ".aidevflow/active-discovery.json").exists():
+        try:
+            from .discovery import Discovery
+            discovery_state = Discovery(root).load()[0]
+        except (ValueError, KeyError, OSError, GateError) as exc:
+            settings_errors.append("Invalid discovery: " + str(exc))
+    if (root / ".aidevflow/discovery-handoff.json").exists():
+        actions.append("Run discovery-start-delivery to recover the interrupted requirements handoff")
     configured_python = project_config(root).get("python")
     if not configured_python or not Path(configured_python).is_file():
         settings_errors.append("Configured Python is unavailable; reinstall from the intended Python environment")
@@ -222,6 +233,8 @@ def doctor_omp(root: Path) -> dict[str, Any]:
             "manifest_mismatches": mismatch, "configuration_drift": drift,
             "method_errors": errors, "settings_errors": settings_errors,
             "method_sources": sources, "next_actions": actions,
+            "workflow_profile": project_config(root).get("workflow_profile", "legacy"),
+            "active_discovery": discovery_state,
             "readiness": {"initial_commit": initial_commit, "python_playwright": playwright,
                           "chromium": "not_probed", "browser_smoke": "run the declared plan against the actual local service"},
             "zsspec_skill_count": len(list(skills_root(root).glob("zsspec-*/SKILL.md"))),

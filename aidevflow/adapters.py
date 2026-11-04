@@ -75,7 +75,7 @@ def validate_projections(plan: dict[str, Any], contract: dict[str, Any], root: P
     return errors
 
 
-def semantic_content(rel: str, content: bytes, plan: dict[str, Any] | None) -> bytes:
+def table_semantic_content(rel: str, content: bytes, plan: dict[str, Any] | None) -> bytes:
     """Ignore only explicitly mapped status cells when identifying a specification."""
     bindings = [item for item in (plan or {}).get("projections", []) if item["path"] == rel]
     if not bindings:
@@ -84,6 +84,15 @@ def semantic_content(rel: str, content: bytes, plan: dict[str, Any] | None) -> b
     for binding in bindings:
         text = replace_status(text, binding["row_id"], "<AIDevFlow-status>")
     return text.encode("utf-8")
+
+
+def semantic_content(rel: str, content: bytes, plan: dict[str, Any] | None) -> bytes:
+    # The adapter binding is pinned with the work plan; old plans retain their byte semantics.
+    from .method_registry import adapter_for
+    adapter = adapter_for({"method": {"profile": (plan or {}).get("method_profile")}})
+    if adapter:
+        return adapter.semantic_content(rel, content, plan)
+    return table_semantic_content(rel, content, plan)
 
 
 def projected_documents(root: Path, plan: dict[str, Any], state: dict[str, Any], checks: dict[str, str]) -> dict[Path, str]:

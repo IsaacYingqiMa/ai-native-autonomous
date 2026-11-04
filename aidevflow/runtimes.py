@@ -17,6 +17,10 @@ def project_config(root: Path) -> dict[str, Any]:
     value = read_json(path) if path.is_file() else {}
     if not isinstance(value, dict) or value.get("runtime", "claude-code") not in NAMES:
         raise GateError("Invalid AIDevFlow project runtime configuration")
+    if value.get("workflow_profile") not in (None, "legacy", "reviewed-discovery-v1"):
+        raise GateError("Unsupported workflow_profile")
+    if value.get("workflow_profile") == "reviewed-discovery-v1" and value.get("runtime") != "omp":
+        raise GateError("reviewed-discovery-v1 currently requires omp")
     for field in ("skills_root", "python"):
         if field in value and (not isinstance(value[field], str) or not value[field].strip()):
             raise GateError(f"Invalid project configuration field: {field}")

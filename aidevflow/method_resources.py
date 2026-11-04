@@ -110,27 +110,41 @@ def load_resource(root: Path, inp: dict[str, Any]) -> dict[str, Any] | None:
         candidate = Path(path_text)
         if not candidate.is_absolute():
             candidate = root / candidate
-        base = next((base for base in [skills_root(root), *(root / rel for rel in ROOTS)]
+        from .method_resolution import source_for
+        base = next((base for base in [source_for(root), skills_root(root), *(root / rel for rel in ROOTS)]
                      if candidate.resolve().is_relative_to(base.resolve())), None)
         if base is None:
             return None  # An ordinary business document with a similar directory name.
         parts = list(candidate.resolve().relative_to(base.resolve()).parts)
-    if not parts or not re.fullmatch(r"zsspec-[a-z0-9-]+", parts[0]) or any(p in ("", ".", "..") for p in parts):
+    is_readme = parts == ["README.md"]
+    if not parts or (not is_readme and not re.fullmatch(r"zsspec-[a-z0-9-]+", parts[0])) or any(p in ("", ".", "..") for p in parts):
         raise GateError("Invalid method resource path")
     if parts[0] in MAINTENANCE_SKILLS:
         raise GateError("zsspec-doctor is maintenance-only; use aidevflow doctor for business preflight")
-    rel = PurePosixPath(*parts, *(["SKILL.md"] if len(parts) == 1 else []))
-    target = (skills_root(root) / rel).resolve()
-    if not target.is_relative_to(skills_root(root)) or not target.is_file():
+    rel = PurePosixPath(*parts, *(["SKILL.md"] if len(parts) == 1 and not is_readme else []))
+    from .method_resolution import source_for
+    method_source = source_for(root)
+    target = (method_source / rel).resolve()
+    if not target.is_relative_to(method_source) or not target.is_file():
         raise GateError(f"Method resource is missing from the pinned source: {rel}")
     state, _, _ = Gate(root)._load_active()
     if selected(root, state) != "omp":
         raise GateError("Resume this task in its bound runtime")
+    policy = {}
     if state.get("method_policy"):
         policy = read_json(root / state["method_policy"]["path"])
         expected = policy["package"]["files"].get(rel.as_posix())
         if expected is None or sha256_file(target) != expected:
             raise GateError("Method resource is unpinned or changed; preserve the task and inspect method integrity")
+    context = managed_context(state["current_stage"])
+    if policy.get("profile") == "zsspec-managed-v2":
+        context += (" Managed v2: Gate owns execution facts; only method-run and sync-projections may call the native "
+                    "status writer. Ordinary design/test-code reviews are delegated to AI with recorded evidence; "
+                    "never claim human review. Use req then plan (DES/TASK/CHK); no legacy des/task/chk/verify Skills. "
+                    "Run method-run verify/gate, baseline with --evidence, and sync-projections after work/check updates. "
+                    "Never directly run zsspec_check.py on live specs. Native done/close waits for actual user acceptance.")
+        context = context.replace("Gate alone writes mapped REQ/TASK/CHK status cells.",
+                                  "The scripted adapter alone synchronizes mapped REQ/TASK/CHK through native commands.")
     return {"input": {**inp, "path": str(target) + span},
-            "additionalContext": managed_context(state["current_stage"]),
+            "additionalContext": context,
             "source": {"path": str(target), "sha256": sha256_file(target)}}
