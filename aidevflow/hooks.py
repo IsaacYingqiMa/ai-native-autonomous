@@ -13,6 +13,8 @@ from .gate import Gate, GateError, read_json, write_json_atomic
 
 PROTECTED_PREFIXES = (
     ".git/",
+    ".zscode/extensions/aidevflow/", ".zscode/agents/aidevflow-", ".zscode/skills/aidevflow-",
+    ".zscode/config.yml", ".zscode/config.yaml", ".zscode/settings.json", ".zscode/skills/zsspec-", ".zscode/skills/.skillhub/",
     ".aidevflow/", "aidevflow/", "scripts/", ".claude/settings.json",
     ".claude/agents/aidevflow-", ".claude/skills/aidevflow-", "evals/acceptance/",
     ".omp/extensions/aidevflow/", ".omp/agents/aidevflow-", ".omp/skills/aidevflow-", ".omp/config.yml", ".omp/settings.json",

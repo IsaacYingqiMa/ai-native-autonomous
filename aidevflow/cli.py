@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .gate import Gate, GateError
+from .backends.zscode.engine import installed as light_installed
 
 
 def _json(value: Any) -> None:
@@ -21,9 +22,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     install = sub.add_parser("install", help="install AIDevFlow and a native coding-agent adapter")
-    install.add_argument("--runtime", choices=("omp", "claude-code"), default="omp")
-    install.add_argument("--skills-root", help="project-local method root; auto discovers .omp/skills or .claude/skills")
+    install.add_argument("--runtime", choices=("omp", "claude-code", "zscode"), default="zscode")
+    install.add_argument("--skills-root", help="project-local method root; auto discovers .omp/skills, .claude/skills or .zscode/skills")
     install.add_argument("--workflow-profile", choices=("legacy", "reviewed-discovery-v1"))
+    install.add_argument("--upgrade-active", action="store_true", help="zscode light only: preserve active checkpoint; close zscode first")
+    install.add_argument("--extend-budgets", action="store_true", help="zscode light only: raise project budgets to extended defaults, preserving higher custom values")
     discovery = sub.add_parser("discovery-create", help="start read-only Intent/PRD preparation")
     discovery.add_argument("--request", required=True)
     sub.add_parser("discovery-status", help="show requirements review state")
@@ -191,7 +194,15 @@ def _main(argv: list[str] | None = None) -> int:
         if args.command == "install":
             from .installer import install
             source_root = Path(__file__).resolve().parents[1]
-            result = install(source_root, Path(args.root), runtime=args.runtime, skills_root=args.skills_root, workflow_profile=args.workflow_profile)
+            result = install(source_root, Path(args.root), runtime=args.runtime, skills_root=args.skills_root, workflow_profile=args.workflow_profile, upgrade_active=args.upgrade_active, extend_budgets=args.extend_budgets)
+        elif light_installed(Path(args.root)):
+            from .backends.zscode.engine import LightGate, doctor as light_doctor
+            if args.command == 'status':
+                result = LightGate(Path(args.root)).status()
+            elif args.command == 'doctor':
+                result = light_doctor(Path(args.root))
+            else:
+                raise GateError('此项目使用 zsspec-light；请在 zscode 使用 /aidevflow-flow 和 aidevflow_light 工具')
         elif args.command.startswith("discovery-"):
             from .discovery import Discovery
             discovery = Discovery(Path(args.root))
@@ -231,7 +242,7 @@ def _main(argv: list[str] | None = None) -> int:
             result = doctor(Path(args.root))
             if args.session_id:
                 from .runtimes import selected
-                if selected(Path(args.root)) == "omp":
+                if selected(Path(args.root)) in ("omp", "zscode"):
                     from .omp import inspect_session
                 else:
                     from .runtime import inspect_session

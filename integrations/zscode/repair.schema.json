@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reason",
+    "group",
+    "changes"
+  ],
+  "properties": {
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Explain the observed failure and its conflict with approved requirements or declared module paths."
+    },
+    "group": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Copy the group from status.recovery.proposal_template."
+    },
+    "changes": {
+      "type": "object",
+      "maxProperties": 20,
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Original test/support path to current-run draft. Empty only with a real spec_path/plan_path change. Do not combine implementation_files with spec_path/plan_path; put complete file corrections in plan_path instead."
+    },
+    "implementation_files": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "description": "Optional correction of GREEN/REFACTOR file lists, keyed by task ID. Preserve validation commands, task order and approved scope."
+    },
+    "spec_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Current run draft JSON path for a reviewed derived revision."
+    },
+    "plan_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Current run draft JSON path for a reviewed derived revision."
+    }
+  }
+}

@@ -1,0 +1,338 @@
+diff --git a/.aidevflow/schemas/plan.schema.json b/.aidevflow/schemas/plan.schema.json
+index 31f30f1..e675844 100644
+--- a/.aidevflow/schemas/plan.schema.json
++++ b/.aidevflow/schemas/plan.schema.json
+@@ -32,6 +32,7 @@
+           "kind": {
+             "type": "string",
+             "enum": [
++              "prepare",
+               "red",
+               "green",
+               "refactor",
+diff --git a/aidevflow/backends/zscode/artifacts.py b/aidevflow/backends/zscode/artifacts.py
+index 55c97cb..ffbcdcc 100644
+--- a/aidevflow/backends/zscode/artifacts.py
++++ b/aidevflow/backends/zscode/artifacts.py
+@@ -44,11 +44,33 @@ def schema_errors(value, schema, path='$'):
+     return errors
+ 
+ 
++def failure_category(reason):
++    """Group failures by root cause so different problems never share one budget."""
++    text = str(reason)
++    buckets = (
++        ('frozen_or_stage', ('不可改写', '当前阶段不能改写', '当前阶段不能执行', '当前已停止', '只能更新', '知识初始化只在',
++                             '只可归档', '归档知识必须', '废弃变更需要', '当前没有可修订', '当前不在基线修订',
++                             '该初始基线审查', '基线审查仍在执行', '基线审查预算耗尽', '修订必须先获得')),
++        ('path_layout', ('规格路径与计划不一致', '测试目标与计划不一致', '任务文件使用规范', '任务不能修改受管资源',
++                         '草稿必须是', '规格缺少章节', '规格需要唯一', '每条规格需要', '冲突声明', '规格必须精确映射')),
++        ('plan_shape', ('计划需要已批准规格', '任务 kind', '任务需要', '每项任务必须', '环境准备必须', '全量回归必须',
++                        'RED/GREEN/REFACTOR', '实现和重构不能', 'REFACTOR 必须', '测试文件不能同时',
++                        'GREEN/REFACTOR 必须', '需要已结束的真实失败', '只可在授权执行范围', 'retry 只适用')),
++        ('native_review', ('修订需要现存冻结', '修订提案已经过期', '修订目标在审查后变化', '独立验收', '验收',
++                           '正式需求', '冻结测试已修改', '先编写当前 RED', '上次执行结果未知')),
++        ('transport', ('只接受当前操作的明确字段', '操作参数必须', '该操作只接受原生用户命令')),
++    )
++    for name, needles in buckets:
++        if any(n in text for n in needles):
++            return name
++    return 'other'
++
++
+ class LightArtifacts:
+     def summary(self):
+         s = self.status()
+         if s.get('active_run') is None and 'stage' not in s: return s
+-        keys = ('run_id', 'stage', 'revision', 'directory', 'next_action', 'regression_fresh',
++        keys = ('run_id', 'stage', 'revision', 'directory', 'next_action', 'skill', 'regression_fresh',
+                 'requirements_feedback_pending', 'repair_feedback', 'attention_reason')
+         result = {k: s[k] for k in keys if k in s}
+         task = s.get('current_task')
+@@ -95,9 +117,12 @@ class LightArtifacts:
+             return {'stopped': True, 'reason': '完整性检查失败，保留原文件，不重写投影'}
+         if state['stage'] in ('paused', 'needs_attention', 'done', 'finalizing'): return {'stopped': True}
+         old = state.get('operation_failure', {})
+-        count = old.get('count', 0) + 1 if old.get('action') == action else 1
++        category = failure_category(reason)
++        same = old.get('action') == action and old.get('category') == category
++        count = old.get('count', 0) + 1 if same else 1
+         total = old.get('total', 0) + 1
+-        state['operation_failure'] = {'action': action, 'count': count, 'total': total, 'reason': str(reason)[:1200]}
++        state['operation_failure'] = {'action': action, 'category': category, 'count': count,
++                                     'total': total, 'reason': str(reason)[:1200]}
+         if count >= 3 or total >= 6:
+             state.update(attention_stage=state['stage'], stage='needs_attention',
+                          attention_reason=f'{action} 失败预算耗尽，停止重复提交：{reason}')
+@@ -120,7 +145,18 @@ class LightArtifacts:
+ 
+     def validate_artifact(self, kind, path):
+         if kind not in KINDS: raise GateError('未知产物类型')
+-        value = read_json(self.draft(path))
++        if kind == 'requirements':
++            # The native analyst owns the requirements file; it lives outside the draft tree.
++            state, _ = self.load()
++            p = self.path(path)
++            receipt = read_json(self.path(state['analyst_invocation'])) if state.get('analyst_invocation') else {}
++            if receipt.get('status') != 'completed' or receipt.get('result_path') != path or not p.is_file():
++                raise GateError('正式需求只接受当前原生分析角色的不可变结果路径；调试草稿不能登记正式需求')
++            if sha256_file(p) != receipt['result_sha256']:
++                raise GateError('原生需求结果已被修改')
++            value = read_json(p)
++        else:
++            value = read_json(self.draft(path))
+         schema = read_json(self.control / 'schemas' / f'{kind}.schema.json')
+         errors = schema_errors(value, schema)
+         if kind == 'requirements' and not errors: errors = validate_requirements(value)
+diff --git a/aidevflow/backends/zscode/bridge.py b/aidevflow/backends/zscode/bridge.py
+index ecc21f0..834297b 100644
+--- a/aidevflow/backends/zscode/bridge.py
++++ b/aidevflow/backends/zscode/bridge.py
+@@ -52,9 +52,12 @@ def model_operation(gate, params):
+             return result
+         if action in ('requirements_context', 'verifier_context', 'prepare_verifier', 'prepare_baseline', 'baseline_context'):
+             return getattr(gate, action)()
+-        getattr(gate, action)(**{k: params[k] for k in fields[action]})
+-        return gate.summary() if action != 'archive' else {'stage': 'archived', 'active_run': None}
+-    except (GateError, ValueError, KeyError, TypeError, OSError) as exc:
++        result = getattr(gate, action)(**{k: params[k] for k in fields[action]})
++        if action == 'archive':
++            return {'stage': result.get('stage'), 'archive': result.get('archive'),
++                    'run_id': result.get('run_id'), 'active_run': None}
++        return gate.summary()
++    except (GateError, ValueError, KeyError, TypeError, OSError, LookupError, AttributeError, StopIteration) as exc:
+         failure = gate.operation_failure(str(action), str(exc)) if action != 'status' else {}
+         suffix = '；已停止重复操作，检查 flow 状态后恢复' if failure.get('stopped') else ''
+         raise GateError(str(exc) + suffix) from exc
+@@ -126,7 +129,8 @@ def serve(root: Path):
+                 else:
+                     result = dispatch(gate, action, payload.get('data', {}), payload.get('source'))
+                 reply = {'id': request['id'], 'ok': True, 'result': result}
+-            except (GateError, ValueError, KeyError, TypeError, OSError, TimeoutError) as exc:
++            except (GateError, ValueError, KeyError, TypeError, OSError, TimeoutError,
++                    LookupError, AttributeError, StopIteration) as exc:
+                 reply = {'id': request.get('id') if isinstance(request, dict) else None, 'ok': False, 'error': str(exc)}
+             print(json.dumps(reply, ensure_ascii=False), flush=True)
+     finally:
+diff --git a/aidevflow/backends/zscode/engine.py b/aidevflow/backends/zscode/engine.py
+index 615f8ba..e8fd2e1 100644
+--- a/aidevflow/backends/zscode/engine.py
++++ b/aidevflow/backends/zscode/engine.py
+@@ -160,7 +160,7 @@ class LightGate(BaselineRepair, Progress, LightArtifacts, LightReview):
+         state, _ = self.load()
+         task = state['tasks'][state['cursor']] if state['cursor'] < len(state['tasks']) else None
+         fresh = state.get('final_candidate') == self.candidate() if state.get('final_candidate') else None
+-        skills = {'discovery': None, 'spec': 'zsspec-spec', 'plan': 'zsspec-plan', 'applying': 'zsspec-apply',
++        skills = {'discovery': 'zsspec-init' if not (self.control / 'light-knowledge.json').is_file() else None, 'spec': 'zsspec-spec', 'plan': 'zsspec-plan', 'applying': 'zsspec-apply',
+                   'repairing': 'zsspec-apply', 'verify': 'zsspec-apply', 'delivery_ready': None, 'done': 'zsspec-archive', 'finalizing': 'zsspec-archive'}
+         return {**state, 'current_task': task, 'regression_fresh': fresh, 'skill': skills.get(state['stage']),
+                 'next_action': {'discovery': 'requirements_context 派发需求分析；完成后 submit requirements 结果路径，等待入口审查',
+@@ -202,8 +202,10 @@ class LightGate(BaselineRepair, Progress, LightArtifacts, LightReview):
+     def spec(self, content: str, acceptance_map: dict):
+         state, run = self.load()
+         self.integrity(state)
+-        if state['stage'] not in ('spec', 'plan') or not state.get('approval'):
+-            raise GateError('规格执行中不可改写；先放弃本变更或提交新变更')
++        if not state.get('approval'):
++            raise GateError('Intent/PRD 尚未批准，规格不能提交；先完成需求讨论并等待人工审查')
++        if state['stage'] not in ('spec', 'plan', 'applying', 'repairing'):
++            raise GateError('当前阶段不能改写规格；规格在 spec、plan 阶段可提交，在 applying/repairing 阶段发现规格与计划冲突时可重新派生')
+         for heading in ('需求', '规格', '已剔除', '知识缺口', 'knowledge 修正项', '冲突声明'):
+             if f'## {heading}' not in content:
+                 raise GateError('规格缺少章节：' + heading)
+@@ -221,12 +223,47 @@ class LightGate(BaselineRepair, Progress, LightArtifacts, LightReview):
+                 not isinstance(v, list) or not v or any(not isinstance(x, str) for x in v) or set(v) - approved for v in acceptance_map.values()
+                 ) or {a for v in acceptance_map.values() for a in v} != approved:
+             raise GateError('规格必须精确映射并完整覆盖 Intent/PRD 已批准的验收 ID')
++        redriven = state['stage'] in ('applying', 'repairing')
++        if redriven:
++            # Re-deriving the specification voids the current plan and every frozen baseline.
++            # The approved Intent/PRD and its acceptance IDs stay untouched.
++            state['baselines'] = {}
++            for key in ('baseline_review', 'red_origins', 'red_snapshot_groups', 'final_candidate',
++                        'verifier_subject', 'verifier_bundle', 'verdict', 'verifier_correction',
++                        'verification_attempts', 'baseline_attempts', 'repair_rounds', 'repair_feedback'):
++                state.pop(key, None)
+         state['spec'] = {'content': content.strip(), 'ids': ids, 'sha256': sha256_bytes(content.strip().encode()),
+                          'acceptance_map': acceptance_map, 'requirements_sha256': state['approval']['sha256']}
+         state.update(tasks=[], cursor=0, stage='plan')
++        if redriven:
++            state['spec_redriven_from'] = 'applying'
+         self.checkpoint(state, run, 'spec_submitted')
+         return self.status()
+ 
++    @staticmethod
++    def spec_code_paths(content):
++        """Project-relative file paths named in each Sx block's 「代码依据」 lines.
++
++        Only backticked, non-wildcard, project-relative paths count, so explanatory
++        references such as `specs/modules/notes.md` never become implicit constraints.
++        """
++        found = set()
++        for block in re.split(r'^### S\d+\b', content, flags=re.M)[1:]:
++            for line in block.splitlines():
++                if '代码依据' not in line:
++                    continue
++                for raw in re.findall(r'`([^`\n]+)`', line):
++                    if any(c in raw for c in '*?<>') or ' ' in raw:
++                        continue
++                    if not re.fullmatch(r'[\w./-]+\.(?:tsx?|jsx?|mjs|cjs|js|py|css|html|json)', raw):
++                        continue
++                    if raw.startswith(('.aidevflow/', '.zscode/', '.git/', 'specs/', 'scripts/', '~/', '/')):
++                        continue
++                    if '..' in raw.split('/'):
++                        continue
++                    found.add(raw)
++        return found
++
+     @staticmethod
+     def command(argv):
+         if not isinstance(argv, list) or not argv or any(not isinstance(x, str) or not x or '\x00' in x for x in argv):
+@@ -295,9 +332,11 @@ class LightGate(BaselineRepair, Progress, LightArtifacts, LightReview):
+         if all_impl.intersection(all_tests):
+             raise GateError('测试文件不能同时声明为实现文件')
+         declared = {file_key(f) for t in clean for f in t['files']}
+-        for ref in set(re.findall(r'\b(?:src|app|tests?)/[A-Za-z0-9_.@/-]+\.(?:tsx?|jsx?|mjs|cjs|py|css)\b', state['spec']['content'])):
+-            if file_key(ref) not in declared and not self.path(ref).is_file():
+-                raise GateError('规格路径与计划不一致：' + ref + '；当前仍在 plan，可纠正规格中的派生路径或计划文件列表再提交，不能改变批准需求')
++        missing = sorted(ref for ref in self.spec_code_paths(state['spec']['content']) if file_key(ref) not in declared)
++        if missing:
++            raise GateError('规格路径与计划不一致：' + '、'.join(missing) + '；这些路径必须与 plan 的 files 逐字一致。'
++                            '当前仍在 plan 阶段，可修改 spec.json 的「代码依据」后 submit kind=spec（会清空当前计划并回到 plan 阶段），'
++                            '或修改 plan.json 的 files 后重新 submit kind=plan；不可改动已批准的验收 ID。')
+         state.update(tasks=clean, stage='applying', cursor=0)
+         self.checkpoint(state, run, 'plan_registered')
+         return self.status()
+@@ -319,6 +358,9 @@ class LightGate(BaselineRepair, Progress, LightArtifacts, LightReview):
+         task = state['tasks'][state['cursor']]
+         if task.get('inflight') or not task.get('result') or task['result']['status'] != 'failed':
+             raise GateError('需要已结束的真实失败结果，未知执行不可重派')
++        if task['kind'] != 'red':
++            raise GateError('retry 只适用于尚未通过的 RED 准备；当前任务是 ' + task['kind']
++                            + '。GREEN/REFACTOR/回归失败请直接修改当前任务声明的文件后 run。')
+         if task['kind'] == 'red':
+             self.baselines(state)
+             state['baselines'].pop(task['group'], None)
+diff --git a/aidevflow/backends/zscode/installer.py b/aidevflow/backends/zscode/installer.py
+index b2ea385..903438c 100644
+--- a/aidevflow/backends/zscode/installer.py
++++ b/aidevflow/backends/zscode/installer.py
+@@ -96,8 +96,8 @@ def _install(source: Path, target: Path, *, skills_root=None, workflow_profile=N
+         files[f'.aidevflow/schemas/{name}.schema.json'] = (source / f'.aidevflow/schemas/{name}.schema.json').read_bytes()
+     # The preparation phase belongs only to this runtime's installed plan schema.
+     plan_schema = json.loads(files['.aidevflow/schemas/plan.schema.json'])
+-    plan_schema['properties']['tasks']['items']['properties']['kind']['enum'].insert(0, 'prepare')
+-    files['.aidevflow/schemas/plan.schema.json'] = json.dumps(plan_schema, ensure_ascii=False, indent=2).encode()
++    if 'prepare' not in plan_schema['properties']['tasks']['items']['properties']['kind']['enum']:
++        raise GateError('安装源的 plan schema 必须包含 prepare 枚举')
+     schema = json.loads((source / 'integrations/zscode/baseline.schema.json').read_text(encoding='utf8'))
+     files['.zscode/agents/aidevflow-baseline-reviewer.md'] = (
+         '---\nname: aidevflow-baseline-reviewer\ndescription: Independent read-only test baseline correctness review.\n'
+diff --git a/aidevflow/backends/zscode/progress.py b/aidevflow/backends/zscode/progress.py
+index 70b1340..d5cac70 100644
+--- a/aidevflow/backends/zscode/progress.py
++++ b/aidevflow/backends/zscode/progress.py
+@@ -6,7 +6,7 @@ import time
+ from ...storage import GateError, read_json, write_json_atomic
+ from ...locking import writes
+ 
+-READS = {'read', 'grep', 'glob', 'web_search', 'environment', 'status'}
++READS = {'read', 'grep', 'glob', 'web_search'}
+ LIMITS = {'providers': 24, 'reads': 32, 'seconds': 900}
+ 
+ 
+diff --git a/aidevflow/backends/zscode/repair.py b/aidevflow/backends/zscode/repair.py
+index 511d386..866cdeb 100644
+--- a/aidevflow/backends/zscode/repair.py
++++ b/aidevflow/backends/zscode/repair.py
+@@ -27,12 +27,16 @@ def cases(text, suffix):
+ 
+ class BaselineRepair:
+     def repair_guidance(self, state):
+-        if state['stage'] not in ('applying', 'needs_attention') or not state['baselines'] or state['cursor'] >= len(state['tasks']): return None
++        if state['stage'] not in ('applying', 'needs_attention') or state['cursor'] >= len(state['tasks']): return None
+         task = state['tasks'][state['cursor']]
+-        if task['kind'] == 'red' or task.get('result', {}).get('status') != 'failed': return None
++        review = state.get('baseline_review') or {}
++        revised = review.get('decision') == 'revise'
++        failed = task.get('result', {}).get('status') == 'failed'
++        if not (revised or (state['baselines'] and failed)): return None
+         group = task.get('group')
+         groups = {g: sorted(files) for g, files in state['baselines'].items()}
+         if group not in groups: group = next(iter(groups)) if len(groups) == 1 else None
++        if revised and group is None: group = review.get('group')
+         draft = f"specs/drafts/{state['run_id']}"
+         tests = [f for f in groups.get(group, []) if re.search(r'^(?:test_|test\.)|\.(?:test|spec)\.|_test\.', Path(f).name, re.I)]
+         changes = {f: f'{draft}/repairs/{f}' for f in tests[:1]}
+@@ -41,6 +45,10 @@ class BaselineRepair:
+             try: self.check_test_targets(state, group)
+             except (GateError, OSError) as exc: issues.append(str(exc)[:1200])
+         return {'requires_user_resume': state['stage'] == 'needs_attention', 'detected_issues': issues,
++            'revise_branches': [
++                '意见指向测试文件本身（断言、夹具、用例覆盖）→ 改当前工作项的 RED 测试文件 → 再次 prepare_baseline → 再次派发审查',
++                '意见指向规格与计划的路径/布局冲突 → 重新 submit kind=spec（清空计划并回到 plan 阶段）→ 重新 submit kind=plan → 再次 prepare_baseline',
++                '意见指向实现文件清单 → 改当前 GREEN/REFACTOR 任务声明的 files → run'],
+             'schema_path': '.zscode/extensions/aidevflow/repair.schema.json', 'proposal_path': draft + '/repair.json',
+             'proposal_exists': self.path(draft + '/repair.json').is_file(),
+             'frozen_groups': groups,
+@@ -125,12 +133,21 @@ class BaselineRepair:
+         state, run = self.load();self.integrity(state);self.baselines(state)
+         if state['stage'] not in ('applying', 'needs_attention') or state.get('attention_stage', 'applying') != 'applying': raise GateError('当前没有可修订的执行基线')
+         task = state['tasks'][state['cursor']]
+-        if task.get('inflight') or not task.get('result') or task['result']['status'] != 'failed': raise GateError('修订必须关联已结束的真实失败')
++        review = state.get('baseline_review') or {}
++        revised = review.get('decision') == 'revise'
++        if task.get('inflight') or (not revised and (not task.get('result') or task['result']['status'] != 'failed')):
++            raise GateError('修订必须关联已结束的真实失败，或一份 decision=revise 的基线审查结论'
++                            + ('（当前任务还没有真实失败结果）' if not revised else ''))
+         self._review_available(state)
+         value = read_json(self.draft(path))
+         if not isinstance(value, dict) or set(value) - {'reason', 'group', 'changes', 'implementation_files'} or not isinstance(value.get('reason'), str) or not value['reason'].strip(): raise GateError('修订需要 reason、group、changes，可选 implementation_files')
+         group = value.get('group')
+-        if group not in state['baselines']: raise GateError('修订需要现存冻结工作项')
++        if group not in state['baselines']:
++            if revised and group == (state.get('baseline_review') or {}).get('group'):
++                pass
++            else:
++                raise GateError('修订需要现存冻结工作项，或一份 decision=revise 的基线审查结论'
++                                + '（可用 review.group；此时用 changes 指向修订草稿、冻结基线在 approve 后由 repair_apply 建立）')
+         changes = value.get('changes')
+         if not isinstance(changes, dict) or not 1 <= len(changes) <= 20: raise GateError('changes 必须为原路径到草稿文件路径的对象，最多20项')
+         allowed = {f for baseline in state['baselines'].values() for f in baseline}
+diff --git a/aidevflow/backends/zscode/review.py b/aidevflow/backends/zscode/review.py
+index ee951ce..f5ac7a3 100644
+--- a/aidevflow/backends/zscode/review.py
++++ b/aidevflow/backends/zscode/review.py
+@@ -197,7 +197,9 @@ class LightReview:
+ 
+     def verifier_schema(self, bundle, correction=None):
+         manifest = self.bundle_intact({'verifier_bundle': bundle})
+-        entry = next(x for x in manifest['files'] if x['label'] == 'verdict-schema.json')
++        entry = next((x for x in manifest['files'] if x['label'] == 'verdict-schema.json'), None)
++        if entry is None:
++            raise GateError('独立验收 bundle 缺少 verdict-schema.json，请重新 prepare_verifier 生成新 bundle')
+         base = read_json(self.path(bundle['path']) / entry['path'])
+         return bound_schema(base, manifest['run_id'], bundle['sha256'], manifest['spec_ids'],
+             [x['path'] for x in manifest['files']], (correction or {}).get('failed_ids', []),
+@@ -360,11 +362,19 @@ class LightReview:
+         state['repair_rounds'] = state.get('repair_rounds', 0) + 1
+         state['repair_feedback'] = reason
+         if state['repair_rounds'] > 6:
+-            state['stage'] = 'needs_attention'
++            # Stop with an explainable reason and a cursor that can produce new evidence.
++            state.pop('final_candidate', None)
++            state.update(attention_stage='applying', stage='needs_attention',
++                         attention_reason='独立验收反复 revise 超过 6 轮，已保留 bundle 与纠错材料；'
++                                         '恢复后请修改实现并重新回归生成新 bundle，不要复用同一 bundle。')
+             return
+         cursor = next(i for i, t in enumerate(state['tasks']) if t['kind'] == 'green')
+         for task in state['tasks'][cursor:]:
+-            if task['kind'] != 'red': task.pop('completed', None)
++            if task['kind'] != 'red':
++                task.pop('completed', None)
++                # Drop the stale result so the repair channel stays usable when the frozen
++                # test itself is wrong; the GREEN task must fail again before repair_propose.
++                task.pop('result', None)
+         state.update(stage='applying', cursor=cursor)
+         state.pop('final_candidate', None)
+ 

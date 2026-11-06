@@ -82,7 +82,7 @@ def draft_file(gate, state: dict, rel: str) -> Path:
 
 def allowed_target(gate, path: str, allowed: set[str]) -> Path:
     result = gate._safe_repo_path(path)
-    if path not in allowed or result.relative_to(gate.root).as_posix() != path or result.relative_to(gate.root).parts[0] in (".git", ".aidevflow", ".claude", ".omp", "aidevflow") or path.startswith("scripts/aidevflow") or path == "specs/zsspec.yml":
+    if path not in allowed or result.relative_to(gate.root).as_posix() != path or result.relative_to(gate.root).parts[0] in (".git", ".aidevflow", ".claude", ".omp", ".zscode", "aidevflow") or path.startswith("scripts/aidevflow") or path == "specs/zsspec.yml":
         raise GateError("Baseline revision may change only declared test/support/spec files, never implementation or method configuration")
     return result
 

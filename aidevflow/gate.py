@@ -17,6 +17,8 @@ from typing import Any
 from .adapters import projected_documents, semantic_content, validate_projections
 from .runtimes import binding as runtime_binding, selected as selected_runtime
 from .locking import writes
+from .storage import (GateError, utc_now, sha256_bytes, sha256_file, valid_red_result, read_json, replace_file_atomic, write_json_atomic, write_json_new, write_bytes_new, safe_id)
+from .requirements import validate_intent, render_intent
 
 
 SCHEMA = "aidevflow/run-state-v1"
@@ -30,101 +32,8 @@ INFRA_FAILURES = (
 ASSERTION_FAILURE_MARKERS = ("assertionerror", "assertion failure", "fail:", "failed", "failure", "tests failed", "test failed", "expected:", "actual:")
 
 
-class GateError(Exception):
-    """An expected workflow or input validation error."""
-
-
 def check_acceptable(item: dict, contract: dict) -> bool:
     return item["status"] == "passed" or (item["status"] == "passed_with_waivers" and contract.get("test_policy", {}).get("allow_approved_waivers") is True)
-
-
-def utc_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def sha256_file(path: Path) -> str:
-    return sha256_bytes(path.read_bytes())
-
-
-def valid_red_result(exit_code: int, output: str) -> bool:
-    diagnostic = output.lower()
-    return (
-        exit_code != 0
-        and not any(term.lower() in diagnostic for term in INFRA_FAILURES)
-        and any(term in diagnostic for term in ASSERTION_FAILURE_MARKERS)
-    )
-
-
-def read_json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise GateError(f"Cannot read valid JSON from {path}: {exc}") from exc
-
-
-def replace_file_atomic(source: str | Path, destination: Path) -> None:
-    """Tolerate short Windows sharing/access races without hiding permanent errors."""
-    for attempt in range(5):
-        try:
-            os.replace(source, destination)
-            return
-        except PermissionError as exc:
-            if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 4:
-                raise
-            time.sleep(0.025 * (2 ** attempt))
-
-
-def write_json_atomic(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        replace_file_atomic(temp_name, path)
-    except Exception:
-        try:
-            os.unlink(temp_name)
-        except OSError:
-            pass
-        raise
-
-
-def write_json_new(path: Path, value: Any) -> None:
-    """An immutable record: even an identity collision cannot replace evidence."""
-    write_bytes_new(path, (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
-
-
-def write_bytes_new(path: Path, content: bytes) -> None:
-    """Publish complete bytes atomically without replacing an existing object."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".pending-")
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if os.name == "nt":
-            # Windows rename is atomic and refuses an existing destination.
-            # It also works in sandboxes/filesystems which prohibit hard links.
-            os.rename(temporary, path)
-        else:
-            os.link(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-
-
-def safe_id(value: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", value):
-        raise GateError("task id must use 1-80 letters, digits, dots, underscores, or hyphens")
-    return value
 
 
 class Gate:
@@ -1006,11 +915,13 @@ class Gate:
             from .baselines import require_support
             require_support(self, contract)
         manifest_path = self.control / "runtime-manifest.json"
-        if selected_runtime(self.root, state) == "omp" and manifest_path.is_file():
+        if selected_runtime(self.root, state) in ("omp", "zscode") and manifest_path.is_file():
             # Shared project defaults may change for future runs. Executable
             # adapters, roles and schemas must still match the installation.
-            prefixes = (".aidevflow/runtime/", ".aidevflow/schemas/", ".omp/extensions/aidevflow/",
-                        ".omp/agents/aidevflow-", ".omp/skills/aidevflow-flow/",
+            from .runtimes import config_dir
+            native_dir = config_dir(selected_runtime(self.root, state))
+            prefixes = (".aidevflow/runtime/", ".aidevflow/schemas/", f"{native_dir}/extensions/aidevflow/",
+                        f"{native_dir}/agents/aidevflow-", f"{native_dir}/skills/aidevflow-flow/",
                         "scripts/aidevflow.py", "scripts/aidevflow_bridge.py", "scripts/aidevflow_browser.py")
             manifest = read_json(manifest_path)
             if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
@@ -1032,7 +943,7 @@ class Gate:
                 mismatches.append(f"{skills_root(self.root).relative_to(self.root).as_posix()} (pinned method package)")
             from .method_registry import adapter_for
             adapter = adapter_for(contract)
-            if adapter and selected_runtime(self.root, state) != "omp":
+            if adapter and selected_runtime(self.root, state) not in ("omp", "zscode"):
                 # OMP rewrites every method read to the task snapshot. Claude's
                 # native Skill loader still resolves the installed copy, so keep
                 # its conservative host-source drift check until it has that adapter.
@@ -1527,7 +1438,7 @@ class Gate:
         from .managed import enabled, artifact_path, file_hash, package_manifest
         from .method_registry import adapter_for
         installed_method_prefixes = ()
-        if (adapter := adapter_for(contract)) and selected_runtime(self.root, state) == "omp":
+        if (adapter := adapter_for(contract)) and selected_runtime(self.root, state) in ("omp", "zscode"):
             from .runtimes import skills_root
             base = skills_root(self.root).relative_to(self.root).as_posix()
             used = {n for v in adapter.stages.values() for n in v} | set(adapter.support)
@@ -2120,130 +2031,6 @@ def validate_work_plan(plan: Any, task_id: str, contract: dict[str, Any]) -> lis
         if resolved != known_ids:
             errors.append("work item dependencies contain a cycle")
     return errors
-
-
-def validate_intent(draft: Any) -> list[str]:
-    if not isinstance(draft, dict):
-        return ["top-level value must be an object"]
-    required = ("schema", "problem", "users", "desired_outcome", "scope", "non_goals", "constraints", "success_criteria", "assumptions", "open_questions")
-    errors = [f"missing {key}" for key in required if key not in draft]
-    if errors:
-        return errors
-    if draft["schema"] != INTENT_SCHEMA:
-        errors.append(f"schema must be {INTENT_SCHEMA}")
-    for key in ("problem", "desired_outcome"):
-        if not isinstance(draft[key], str) or not draft[key].strip():
-            errors.append(f"{key} must be a non-empty string")
-    for key in ("users", "scope", "non_goals", "constraints", "success_criteria", "assumptions", "open_questions"):
-        if not isinstance(draft[key], list):
-            errors.append(f"{key} must be an array")
-    for key in ("users", "scope", "non_goals", "constraints", "success_criteria"):
-        if isinstance(draft[key], list) and any(not isinstance(value, str) or not value.strip() for value in draft[key]):
-            errors.append(f"{key} entries must be non-empty strings")
-    if isinstance(draft["assumptions"], list):
-        for assumption in draft["assumptions"]:
-            if not isinstance(assumption, dict) or set(assumption) != {"statement", "reason", "revisit_if"}:
-                errors.append("each assumption requires exactly statement, reason, and revisit_if")
-            elif any(not isinstance(assumption[field], str) or not assumption[field].strip() for field in ("statement", "reason", "revisit_if")):
-                errors.append("assumption fields must be non-empty strings")
-    if not isinstance(draft["success_criteria"], list) or not draft["success_criteria"]:
-        errors.append("at least one success criterion is required")
-    questions = draft.get("open_questions", [])
-    seen: set[str] = set()
-    decisions = draft.get("decisions", [])
-    if not isinstance(decisions, list):
-        errors.append("decisions must be an array")
-        decisions = []
-    decision_ids = [entry.get("question_id") for entry in decisions if isinstance(entry, dict)]
-    if len(decision_ids) != len(set(decision_ids)):
-        errors.append("each question can have at most one current decision")
-    question_map: dict[str, dict[str, Any]] = {}
-    for question in questions if isinstance(questions, list) else []:
-        if not isinstance(question, dict):
-            errors.append("each open question must be an object")
-            continue
-        qid = question.get("id")
-        if not isinstance(qid, str) or not qid:
-            errors.append("each open question needs a non-empty id")
-            continue
-        if qid in seen:
-            errors.append(f"duplicate question id {qid}")
-        seen.add(qid)
-        question_map[qid] = question
-        allowed_question_keys = {"id", "question", "blocking", "options", "recommended_option", "recommendation_reason"}
-        if set(question) != allowed_question_keys:
-            errors.append(f"question {qid} requires exactly {', '.join(sorted(allowed_question_keys))}")
-        if not isinstance(question.get("question"), str) or not question["question"].strip():
-            errors.append(f"question {qid} needs non-empty question text")
-        if not isinstance(question.get("blocking"), bool):
-            errors.append(f"question {qid} needs boolean blocking")
-        options = question.get("options")
-        if not isinstance(options, list):
-            errors.append(f"question {qid} options must be an array")
-            options = []
-        option_ids = [opt.get("id") for opt in options if isinstance(opt, dict)]
-        if len(option_ids) != len(options) or any(not isinstance(value, str) or not value for value in option_ids) or len(set(option_ids)) != len(option_ids):
-            errors.append(f"question {qid} options need unique non-empty ids and object entries")
-        for option in options:
-            if isinstance(option, dict):
-                if set(option) != {"id", "label", "impact"}:
-                    errors.append(f"question {qid} option requires exactly id, label, and impact")
-                elif any(not isinstance(option.get(field), str) or not option[field].strip() for field in ("id", "label", "impact")):
-                    errors.append(f"question {qid} options require non-empty id, label, and impact")
-        if question.get("blocking") and not 2 <= len(options) <= 4:
-            errors.append(f"blocking question {qid} must offer 2-4 options")
-        recommended = question.get("recommended_option")
-        if question.get("blocking") and recommended not in option_ids:
-            errors.append(f"question {qid} must recommend one listed option")
-        if not question.get("blocking") and recommended is not None and recommended not in option_ids:
-            errors.append(f"question {qid} recommended_option must be null or a listed option")
-        if not isinstance(question.get("recommendation_reason"), str):
-            errors.append(f"question {qid} recommendation_reason must be a string")
-    for decision in decisions:
-        if not isinstance(decision, dict) or decision.get("question_id") not in seen:
-            errors.append("decision references an unknown question")
-            continue
-        if set(decision) != {"question_id", "option_id", "answer", "recorded_at"}:
-            errors.append(f"decision for {decision['question_id']} has unexpected or missing fields")
-        question = question_map[decision["question_id"]]
-        option_id = decision.get("option_id")
-        option_ids = {option.get("id") for option in question.get("options", []) if isinstance(option, dict)}
-        if option_id is not None and option_id not in option_ids:
-            errors.append(f"decision for {decision['question_id']} references an unknown option")
-        if not isinstance(decision.get("answer"), str) or not decision["answer"].strip():
-            errors.append(f"decision for {decision['question_id']} needs a non-empty answer")
-        if not isinstance(decision.get("recorded_at"), str) or not decision["recorded_at"].strip():
-            errors.append(f"decision for {decision['question_id']} needs recorded_at")
-    extra = set(draft) - set(required) - {"decisions"}
-    if extra:
-        errors.append("unexpected properties: " + ", ".join(sorted(extra)))
-    return errors
-
-
-def render_intent(task_id: str, title: str, draft: dict[str, Any]) -> str:
-    def bullets(values: list[Any]) -> str:
-        return "\n".join(f"- {value}" for value in values) if values else "- 无"
-
-    decisions = {item["question_id"]: item for item in draft.get("decisions", [])}
-    questions = []
-    for item in draft["open_questions"]:
-        decision = decisions.get(item["id"])
-        status = f"已决：{decision['answer']}" if decision else ("阻塞" if item["blocking"] else "非阻塞")
-        questions.append(f"- **{item['id']}**：{item['question']}（{status}）")
-    assumptions = [f"{a['statement']}；原因：{a['reason']}；复核条件：{a['revisit_if']}" for a in draft["assumptions"]]
-    return (
-        f"# Intent: {title}\n\n"
-        f"- Task: `{task_id}`\n- Schema: `{draft['schema']}`\n\n"
-        f"## 要解决的问题\n\n{draft['problem']}\n\n"
-        f"## 受影响用户\n\n{bullets(draft['users'])}\n\n"
-        f"## 期望结果\n\n{draft['desired_outcome']}\n\n"
-        f"## 本次范围\n\n{bullets(draft['scope'])}\n\n"
-        f"## 非目标\n\n{bullets(draft['non_goals'])}\n\n"
-        f"## 约束\n\n{bullets(draft['constraints'])}\n\n"
-        f"## 成功标准\n\n{bullets(draft['success_criteria'])}\n\n"
-        f"## 假设\n\n{bullets(assumptions)}\n\n"
-        f"## 未决问题与用户决策\n\n{bullets(questions)}\n"
-    )
 
 
 def validate_verdict(verdict: Any, state: dict[str, Any], run_dir: Path, contract: dict[str, Any]) -> list[str]:

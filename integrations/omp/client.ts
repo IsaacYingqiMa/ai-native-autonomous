@@ -9,7 +9,7 @@ export class Bridge {
   private nextId = 0;
   private pending = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 
-  constructor(private readonly root: string) {}
+  constructor(private readonly root: string, private readonly runtime: string = "omp") {}
 
   private start(): void {
     const config = JSON.parse(readFileSync(join(this.root, ".aidevflow/project.json"), "utf8"));
@@ -50,7 +50,7 @@ export class Bridge {
   request(action: string, payload: unknown = {}): Promise<any> {
     if (!this.child) this.start();
     const id = String(++this.nextId);
-    const frame = JSON.stringify({ protocol: 1, id, action, payload }) + "\n";
+    const frame = JSON.stringify({ protocol: 1, runtime: this.runtime, id, action, payload }) + "\n";
     if (Buffer.byteLength(frame) > 8 * 1024 * 1024) return Promise.reject(new Error("AIDevFlow frame too large"));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {

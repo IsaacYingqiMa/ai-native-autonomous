@@ -7,7 +7,7 @@ from typing import Any
 
 from .gate import GateError
 
-ROOTS = (".omp/skills", ".claude/skills")
+ROOTS = (".omp/skills", ".claude/skills", ".zscode/skills")
 MAINTENANCE_SKILLS = {"zsspec-doctor"}
 
 
@@ -47,10 +47,10 @@ def installation_root(root: Path, runtime: str, config: dict[str, Any], requeste
         return local_root(root, value).relative_to(root.resolve()).as_posix()
     found = [rel for rel, names in candidates(root).items() if names]
     if len(found) > 1:
-        raise GateError("Multiple method roots found; install with --skills-root .omp/skills or .claude/skills")
+        raise GateError("Multiple method roots found; install with --skills-root .omp/skills, .claude/skills or .zscode/skills")
     if found:
         return found[0]
-    return local_root(root, value or (".omp/skills" if runtime == "omp" else ".claude/skills")).relative_to(root.resolve()).as_posix()
+    return local_root(root, value or ({"omp": ".omp/skills", "zscode": ".zscode/skills", "claude-code": ".claude/skills"}[runtime])).relative_to(root.resolve()).as_posix()
 
 
 def source_status(root: Path) -> dict[str, Any]:
@@ -128,7 +128,7 @@ def load_resource(root: Path, inp: dict[str, Any]) -> dict[str, Any] | None:
     if not target.is_relative_to(method_source) or not target.is_file():
         raise GateError(f"Method resource is missing from the pinned source: {rel}")
     state, _, _ = Gate(root)._load_active()
-    if selected(root, state) != "omp":
+    if selected(root, state) not in ("omp", "zscode"):
         raise GateError("Resume this task in its bound runtime")
     policy = {}
     if state.get("method_policy"):

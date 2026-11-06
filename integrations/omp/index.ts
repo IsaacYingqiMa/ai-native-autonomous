@@ -3,6 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Bridge } from "./client";
 
+const hostRuntime = "omp";
+
 const roles = new Set(["aidevflow-intent-analyst", "aidevflow-contract-planner", "aidevflow-independent-verifier", "aidevflow-requirements-analyst"]);
 const reads = new Set(["read", "grep", "glob", "web_search", "ask", "todo", "wait", "recall", "reflect"]);
 const criticalInput = (input: any): boolean => roles.has(String(input?.agent)) ||
@@ -33,7 +35,7 @@ export default function aidevflow(pi: ExtensionAPI): void {
     if (!bridge || root !== ctx.cwd) {
       bridge?.close();
       root = ctx.cwd;
-      bridge = new Bridge(root);
+      bridge = new Bridge(root, hostRuntime);
     }
     return bridge;
   };

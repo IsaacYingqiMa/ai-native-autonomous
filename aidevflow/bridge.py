@@ -27,7 +27,7 @@ def guard(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     discovering = (root / ".aidevflow/active-discovery.json").is_file()
     active = (root / ".aidevflow/active-run.json").is_file() or discovering
     role = (payload.get("actor") or {}).get("name")
-    if active and selected(root) != "omp":
+    if active and selected(root) not in ("omp", "zscode"):
         return {"block": True, "reason": "Active task belongs to another runtime; resume it there"}
     if role in ROLE_ALIASES:
         if tool not in {"read", "grep", "glob", "yield"}:
@@ -96,7 +96,11 @@ def guard(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     return {"block": bool(code), "reason": stderr.getvalue().strip() if code else ""}
 
 
-def dispatch(root: Path, action: str, payload: dict[str, Any]) -> Any:
+def dispatch(root: Path, action: str, payload: dict[str, Any], host_runtime: str | None = None) -> Any:
+    if host_runtime is not None:
+        if host_runtime not in ("omp", "zscode") or host_runtime != selected(root):
+            raise GateError("Native host does not match the selected execution runtime; resume the task in its bound runtime")
+        payload = {**payload, "runtime": host_runtime}
     gate = Gate(root)
     if action in ("flow-enter", "review-prepare", "review-respond"):
         from .workflow import Workflow
@@ -109,10 +113,10 @@ def dispatch(root: Path, action: str, payload: dict[str, Any]) -> Any:
     if action == "discovery-approve":
         from .discovery import Discovery
         return Discovery(root).approve(payload["id"], payload["revision"], payload["sha256"],
-                                       "omp user", payload["utterance"], "native_user_command")
+                                       selected(root) + " user", payload["utterance"], "native_user_command")
     if action == "method-accept":
         from .method_execution import execute
-        return execute(root, "close", payload["module"], by="omp user", utterance=payload["utterance"])
+        return execute(root, "close", payload["module"], by=selected(root) + " user", utterance=payload["utterance"])
     if action == "ping":
         return {"protocol": 1, "runtime": selected(root), "python": sys.executable}
     if action == "status":
@@ -159,12 +163,12 @@ def dispatch(root: Path, action: str, payload: dict[str, Any]) -> Any:
         if not gate.active_path.is_file() and not (root / ".aidevflow/active-discovery.json").is_file():
             return {"recovered_events": 0}
         result = recover(root)
-        if selected(root) == "omp" and payload.get("entries"):
+        if selected(root) in ("omp", "zscode") and payload.get("entries"):
             from .omp import recover_branch
             result["recovered_events"] += recover_branch(root, payload["session_id"], payload["entries"])
         return result
     if action == "stop":
-        if not gate.active_path.is_file() or selected(root) != "omp":
+        if not gate.active_path.is_file() or selected(root) not in ("omp", "zscode"):
             return None
         from .continuation import decide
         result = decide(root, {})
@@ -202,6 +206,9 @@ def _serve(root: Path, leases: list[Any]) -> int:
             payload = request.get("payload", {})
             if not isinstance(payload, dict):
                 raise GateError("Bridge payload must be an object")
+            host_runtime = request.get("runtime", "omp")
+            if host_runtime not in ("omp", "zscode") or host_runtime != selected(root):
+                raise GateError("Native host does not match the selected execution runtime")
             if (not leases and request.get("action") in ("guard", "observe", "flow-enter", "review-prepare", "review-respond")
                     and payload.get("actor", {}).get("kind") == "main"
                     and (request.get("action") == "flow-enter" or (root / ".aidevflow/active-run.json").is_file() or (root / ".aidevflow/active-discovery.json").is_file())):
@@ -209,7 +216,7 @@ def _serve(root: Path, leases: list[Any]) -> int:
                 lease = observer_lock(root / ".aidevflow", timeout=0, name="coordinator.lock")
                 lease.__enter__()
                 leases.append(lease)
-            result = dispatch(root, request.get("action", ""), payload)
+            result = dispatch(root, request.get("action", ""), payload, host_runtime)
             reply = {"id": request["id"], "ok": True, "result": result}
         except (GateError, ValueError, OSError, KeyError, TypeError, TimeoutError) as exc:
             reply = {"id": request.get("id") if isinstance(request, dict) else None, "ok": False, "error": str(exc)}

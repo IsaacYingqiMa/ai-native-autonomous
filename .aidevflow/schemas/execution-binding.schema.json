@@ -5,7 +5,7 @@
   "required": ["schema", "runtime", "adapter_version", "skills_root"],
   "properties": {
     "schema": {"const": "aidevflow/execution-binding-v1"},
-    "runtime": {"enum": ["omp", "claude-code"]},
+    "runtime": {"enum": ["omp", "claude-code", "zscode"]},
     "adapter_version": {"type": "string", "minLength": 1},
     "skills_root": {"type": "string", "minLength": 1}
   },

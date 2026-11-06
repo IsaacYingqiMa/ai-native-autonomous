@@ -11,6 +11,7 @@ from .gate import (Gate, GateError, read_json, safe_id, sha256_file, utc_now,
                    write_bytes_new)
 from .locking import writes
 from .runtimes import binding, digest, project_config
+from .requirements import validate_requirements
 
 PROFILE = "reviewed-discovery-v1"
 
@@ -23,56 +24,6 @@ def subject(root: Path):
     if (root / ".aidevflow/active-discovery.json").is_file():
         return Discovery(root).load()
     return Gate(root)._load_active()
-
-
-def validate_requirements(value: Any) -> list[str]:
-    if not isinstance(value, dict):
-        return ["requirements must be an object"]
-    errors = []
-    if set(value) != {"schema", "intent", "prd", "requirements", "scenarios"} or value.get("schema") != "aidevflow/requirements-v1":
-        errors.append("requirements-v1 requires exactly schema, intent, prd, requirements and scenarios")
-    errors += validate_intent(value.get("intent"))
-    if not isinstance(value.get("prd"), str) or not value["prd"].strip():
-        errors.append("prd must be non-empty Markdown")
-    requirements, scenarios = value.get("requirements"), value.get("scenarios")
-    if not isinstance(requirements, list) or not requirements or not isinstance(scenarios, list) or not scenarios:
-        return errors + ["non-empty requirements and scenarios arrays are required"]
-    req_ids, scenario_ids, acceptance_ids = set(), set(), set()
-    for req in requirements:
-        if not isinstance(req, dict) or set(req) != {"id", "statement", "source", "acceptance_ids"}:
-            errors.append("each requirement needs id, statement, source and acceptance_ids")
-            continue
-        if any(not isinstance(req[k], str) or not req[k].strip() for k in ("id", "statement", "source")):
-            errors.append("requirement fields must be non-empty strings")
-            continue
-        if req["id"] in req_ids:
-            errors.append("duplicate requirement id")
-        req_ids.add(req["id"])
-        ids = req["acceptance_ids"]
-        if not isinstance(ids, list) or not ids or any(not isinstance(i, str) or not i.strip() for i in ids):
-            errors.append("requirement acceptance_ids must be non-empty strings")
-        else:
-            acceptance_ids.update(ids)
-    covered, scenario_acceptance = set(), set()
-    for scn in scenarios:
-        if not isinstance(scn, dict) or set(scn) != {"id", "requirement_ids", "acceptance_ids", "given", "when", "then"}:
-            errors.append("scenario requires id, requirement_ids, acceptance_ids, given, when and then")
-            continue
-        if any(not isinstance(scn[k], str) or not scn[k].strip() for k in ("id", "given", "when", "then")):
-            errors.append("scenario text must be non-empty")
-            continue
-        if scn["id"] in scenario_ids:
-            errors.append("duplicate scenario id")
-        scenario_ids.add(scn["id"])
-        for field, known, target in (("requirement_ids", req_ids, covered), ("acceptance_ids", acceptance_ids, scenario_acceptance)):
-            ids = scn[field]
-            if not isinstance(ids, list) or not ids or any(not isinstance(i, str) or i not in known for i in ids):
-                errors.append(f"scenario {field} must reference declared IDs")
-            else:
-                target.update(ids)
-    if req_ids - covered or acceptance_ids - scenario_acceptance:
-        errors.append("scenarios must cover every requirement and acceptance ID")
-    return errors
 
 
 def verify_reference(root: Path, ref: dict) -> dict:
@@ -162,8 +113,8 @@ class Discovery:
     def create(self, request: str, *, request_text: str | None = None):
         gate = Gate(self.root)
         gate._assert_git_root()
-        if not reviewed(self.root) or project_config(self.root).get("runtime") != "omp":
-            raise GateError("Discovery requires omp with workflow_profile=reviewed-discovery-v1")
+        if not reviewed(self.root) or project_config(self.root).get("runtime") not in ("omp", "zscode"):
+            raise GateError("Discovery requires omp or zscode with workflow_profile=reviewed-discovery-v1")
         if self.active.exists() or gate.active_path.exists() or self.transaction.exists():
             raise GateError("An active context or handoff already exists; resume it first")
         source = gate._safe_repo_path(request) if request_text is None else None
@@ -197,7 +148,7 @@ class Discovery:
             raise GateError("Requirement source must reference the snapshotted request or a Gate-recorded answer")
         from .receipts import completed_results, execution_context, read_invocations
         receipts = completed_results(read_invocations(directory), "requirements_analyst", digest(value), 0, None,
-                                     execution_context(state), "omp")
+                                     execution_context(state), state["execution_binding"]["runtime"])
         if not receipts:
             raise GateError("Requirements require a completed current native analyst receipt")
         prior = [int(p.name) for p in (directory / "revisions").glob("*") if p.is_dir() and p.name.isdecimal()]

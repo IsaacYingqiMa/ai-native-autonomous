@@ -55,7 +55,7 @@ def runtime_identity() -> dict[str, Any]:
 
 def doctor(root: Path) -> dict[str, Any]:
     from .runtimes import selected
-    if selected(root) == "omp":
+    if selected(root) in ("omp", "zscode"):
         return doctor_omp(root)
     from .gate import read_json, sha256_file
     root = root.resolve()
@@ -155,12 +155,15 @@ def doctor_omp(root: Path) -> dict[str, Any]:
     from .gate import Gate, GateError, read_json, sha256_file
     from .runtimes import identity, skills_root, project_config
     from .method_resources import source_status
+    from .runtimes import selected, config_dir, adapter_version
+    name = selected(root)
+    native_dir = config_dir(name)
     root = root.resolve()
-    missing = [rel for rel in (".omp/extensions/aidevflow/index.ts", ".omp/extensions/aidevflow/client.ts",
-                              "scripts/aidevflow_bridge.py", ".omp/skills/aidevflow-flow/SKILL.md") if not (root / rel).is_file()]
-    roles = [f".omp/agents/aidevflow-{role}.md" for role in ("intent-analyst", "contract-planner", "independent-verifier")]
+    missing = [rel for rel in (f"{native_dir}/extensions/aidevflow/index.ts", f"{native_dir}/extensions/aidevflow/client.ts",
+                              "scripts/aidevflow_bridge.py", f"{native_dir}/skills/aidevflow-flow/SKILL.md") if not (root / rel).is_file()]
+    roles = [f"{native_dir}/agents/aidevflow-{role}.md" for role in ("intent-analyst", "contract-planner", "independent-verifier")]
     if project_config(root).get("workflow_profile") == "reviewed-discovery-v1":
-        roles.append(".omp/agents/aidevflow-requirements-analyst.md")
+        roles.append(f"{native_dir}/agents/aidevflow-requirements-analyst.md")
     absent_roles = [rel for rel in roles if not (root / rel).is_file()]
     manifest_path = root / ".aidevflow/runtime-manifest.json"
     mismatch, drift = [], []
@@ -188,7 +191,7 @@ def doctor_omp(root: Path) -> dict[str, Any]:
     if not sources["skill_count"]:
         found = [rel for rel, names in sources["candidates"].items() if names]
         if found:
-            actions.append("Stop the OMP session, then reinstall with --runtime omp --skills-root " + found[0] + "; do not move or edit an active task's pinned assets")
+            actions.append("Stop the OMP session, then reinstall with --runtime " + name + " --skills-root " + found[0] + "; do not move or edit an active task's pinned assets")
         else:
             actions.append("Install the complete vendor method distribution in the selected root, excluding maintenance-only zsspec-doctor")
     warnings = ["doctor does not dispatch roles or establish live compatibility.",
@@ -208,7 +211,7 @@ def doctor_omp(root: Path) -> dict[str, Any]:
         except (ValueError, KeyError, OSError, GateError) as exc:
             settings_errors.append("Invalid discovery: " + str(exc))
     if (root / ".aidevflow/discovery-handoff.json").exists():
-        actions.append("Run discovery-start-delivery to recover the interrupted requirements handoff")
+        actions.append("Run discovery-start-delivery to recover the interrupted requirements handof")
     configured_python = project_config(root).get("python")
     if not configured_python or not Path(configured_python).is_file():
         settings_errors.append("Configured Python is unavailable; reinstall from the intended Python environment")
@@ -224,9 +227,9 @@ def doctor_omp(root: Path) -> dict[str, Any]:
     playwright = "not_probed_in_configured_interpreter"
     if configured_python and Path(configured_python).resolve() == Path(sys.executable).resolve():
         playwright = "installed" if importlib.util.find_spec("playwright") else "not_installed"
-    info = identity("omp")
+    info = identity(name)
     if not info["executable"]:
-        errors.append("OMP executable not found on PATH")
+        errors.append(f"{name} executable not found on PATH")
     return {"schema": "aidevflow/doctor-v1", "runtime": info,
             "ok": not (missing or absent_roles or mismatch or errors or settings_errors),
             "missing_hooks": missing, "missing_roles": absent_roles,
@@ -239,7 +242,7 @@ def doctor_omp(root: Path) -> dict[str, Any]:
                           "chromium": "not_probed", "browser_smoke": "run the declared plan against the actual local service"},
             "zsspec_skill_count": len(list(skills_root(root).glob("zsspec-*/SKILL.md"))),
             "active_run": {key: state.get(key) for key in ("task_id", "current_stage", "status")} if state else None,
-            "capabilities": {"adapter": "omp-v1", "tested_protocol_version": "18.13.2",
+            "capabilities": {"adapter": adapter_version(name), "tested_protocol_version": "18.13.2" if name == "omp" else None,
                              "live_dispatch": "unverified", "continuation": ["native", "bounded_stop", "manual"],
                              "browser": "frozen local Playwright plan; command evidence plus separate visual attestation",
                              "static_review": "serial coordinator dimensions",

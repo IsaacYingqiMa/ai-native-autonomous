@@ -38,7 +38,7 @@ def completed_results(entries: list[dict[str, Any]], role: str, digest: str,
             if entry.get("role", ROLE_ALIASES.get(entry.get("agent_type"))) == role
             and (runtime is None or entry.get("runtime", "claude-code") == runtime)
             and entry.get("receipt_schema") in (None, "aidevflow/invocation-v1", "aidevflow/invocation-v2", "aidevflow/invocation-v3")
-            and (runtime != "omp" or entry.get("receipt_schema") == "aidevflow/invocation-v3")
+            and (runtime not in ("omp", "zscode") or entry.get("receipt_schema") == "aidevflow/invocation-v3")
             and entry.get("status") == "completed"
             and entry.get("result_sha256") == digest
             and entry.get("evidence_epoch", 0) == epoch

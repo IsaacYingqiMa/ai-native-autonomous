@@ -17,7 +17,7 @@ SCHEMA = "aidevflow/invocation-v3"
 MAX_BYTES = 8 * 1024 * 1024
 
 
-def _request(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _request(payload: dict[str, Any], runtime: str = "omp") -> tuple[str, dict[str, Any]]:
     from .gate import GateError
     session, call = payload.get("session_id"), payload.get("toolCallId")
     if not all(isinstance(x, str) and x.strip() and len(x) <= 256 for x in (session, call)):
@@ -32,7 +32,7 @@ def _request(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         raise GateError("OMP role assignment is empty")
     if inp.get("isolated") or inp.get("tasks") or inp.get("sourceSession") or "tools" in inp or "outputSchema" in inp:
         raise GateError("Critical OMP roles must use a fresh single non-isolated task")
-    return digest(["omp", session, call])[:32], inp
+    return digest([runtime, session, call])[:32], inp
 
 
 def observe(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
@@ -40,17 +40,20 @@ def observe(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
     from .agents import parse_result
     if len(json.dumps(payload, ensure_ascii=False).encode()) > MAX_BYTES:
         raise GateError("OMP observation exceeds size limit")
-    ident, inp = _request(payload)
+    name = selected(root)
+    if name not in ("omp", "zscode") or payload.get("runtime", name) != name:
+        raise GateError("Observation runtime does not match the bound native host")
+    ident, inp = _request(payload, name)
     if payload.get("type") not in ("tool_call", "tool_result"):
         raise GateError("Unsupported OMP observation event")
     with observer_lock(root / ".aidevflow"):
         gate = Gate(root)
         from .discovery import subject
         state, run, _ = subject(root)
-        if selected(root, state) != "omp":
+        if selected(root, state) != name:
             raise GateError("This task is pinned to a different runtime")
         path = run / "agent-invocations" / f"{ident}.json"
-        source = run / "omp-observations" / f"{digest(payload)}.json"
+        source = run / f"{selected(root)}-observations" / f"{digest(payload)}.json"
         if source.is_file() and path.is_file():
             return read_json(path)
         sequence = read_json(path).get("native_sequence", 0) + 1 if path.is_file() else 1
@@ -71,7 +74,7 @@ def observe(root: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 assignment = inp.get("shared_context", "") + "\n" + inp["task"]
                 if not bundle.get("sha256") or bundle["sha256"] not in assignment or bundle["path"] not in assignment:
                     raise GateError("Verifier dispatch must include the exact prepared bundle path and SHA-256")
-            receipt = {"id": ident, "receipt_schema": SCHEMA, "runtime": "omp",
+            receipt = {"id": ident, "receipt_schema": SCHEMA, "runtime": selected(root),
                        "task_id": state["task_id"], "session_id": payload["session_id"],
                        "tool_use_id": payload["toolCallId"], "agent_type": inp["agent"],
                        "role": ROLE_ALIASES[inp["agent"]], "context": execution_context(state),
@@ -180,16 +183,16 @@ def _recover(root: Path, session: str | None) -> dict[str, Any]:
     recovered = 0
     warnings = []
     latest: dict[str, dict[str, Any]] = {}
-    for path in (run / "omp-observations").glob("*.json"):
+    for path in (run / f"{selected(root)}-observations").glob("*.json"):
         record = read_json(path)
         payload = record["payload"]
         if path.stem != digest(payload):
             raise GateError("OMP observation source digest changed; preserve the run for diagnosis")
         if session and payload.get("session_id") != session:
             continue
-        ident, inp = _request(payload)
+        ident, inp = _request(payload, selected(root))
         snapshot = record["receipt"]
-        if snapshot.get("id") != ident or snapshot.get("input_digest") != digest(inp):
+        if snapshot.get("runtime") != selected(root) or snapshot.get("id") != ident or snapshot.get("input_digest") != digest(inp):
             raise GateError("OMP recovery snapshot does not match its native input")
         if (ident in latest and snapshot.get("native_sequence", 0) == latest[ident].get("native_sequence", 0)
                 and snapshot != latest[ident]):
@@ -204,15 +207,15 @@ def _recover(root: Path, session: str | None) -> dict[str, Any]:
             write_json_atomic(target, snapshot)
         if target.is_file() and target.read_bytes() != before:
             recovered += 1
-    return {"runtime": "omp", "recovered_events": recovered, "warnings": warnings}
+    return {"runtime": selected(root), "recovered_events": recovered, "warnings": warnings}
 
 
 def inspect_session(root: Path, session: str) -> dict[str, Any]:
     from .gate import Gate, read_json
     from .discovery import subject
     _, run, _ = subject(root)
-    events = [read_json(path)["payload"] for path in (run / "omp-observations").glob("*.json")]
-    return {"session_id": session, "runtime": "omp", "events": [event for event in events if event.get("session_id") == session],
+    events = [read_json(path)["payload"] for path in (run / f"{selected(root)}-observations").glob("*.json")]
+    return {"session_id": session, "runtime": selected(root), "events": [event for event in events if event.get("session_id") == session],
             "warnings": ["Only adapter-captured native observations are inspected; missing native output is not inferred."]}
 
 
@@ -241,7 +244,7 @@ def recover_branch(root: Path, session: str, entries: list[dict[str, Any]]) -> i
             candidate = inp.get("tasks", [inp])
             if not isinstance(candidate, list) or len(candidate) != 1 or not isinstance(candidate[0], dict) or candidate[0].get("agent") not in ROLE_ALIASES:
                 continue
-            path = run / "agent-invocations" / f"{digest(['omp', session, call])[:32]}.json"
+            path = run / "agent-invocations" / f"{digest([selected(root), session, call])[:32]}.json"
             if not path.is_file() or read_json(path).get("status") not in ("dispatched", "started"):
                 continue
             observe(root, {"type": "tool_result", "session_id": session, "toolCallId": call,

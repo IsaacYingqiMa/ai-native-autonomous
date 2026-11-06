@@ -8,7 +8,21 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-NAMES = ("omp", "claude-code")
+NAMES = ("omp", "claude-code", "zscode")
+NATIVE_RUNTIMES = ("omp", "zscode")
+
+
+def is_native(name: str) -> bool:
+    return name in NATIVE_RUNTIMES
+
+
+def config_dir(name: str) -> str:
+    return {"omp": ".omp", "zscode": ".zscode", "claude-code": ".claude"}[name]
+
+
+def adapter_version(name: str) -> str:
+    return {"omp": "omp-v1", "zscode": "zscode-v1", "claude-code": "claude-observer-b2"}[name]
+
 
 
 def project_config(root: Path) -> dict[str, Any]:
@@ -19,8 +33,8 @@ def project_config(root: Path) -> dict[str, Any]:
         raise GateError("Invalid AIDevFlow project runtime configuration")
     if value.get("workflow_profile") not in (None, "legacy", "reviewed-discovery-v1"):
         raise GateError("Unsupported workflow_profile")
-    if value.get("workflow_profile") == "reviewed-discovery-v1" and value.get("runtime") != "omp":
-        raise GateError("reviewed-discovery-v1 currently requires omp")
+    if value.get("workflow_profile") == "reviewed-discovery-v1" and not is_native(value.get("runtime")):
+        raise GateError("reviewed-discovery-v1 currently requires omp or zscode")
     for field in ("skills_root", "python"):
         if field in value and (not isinstance(value[field], str) or not value[field].strip()):
             raise GateError(f"Invalid project configuration field: {field}")
@@ -40,6 +54,10 @@ def selected(root: Path, state: dict[str, Any] | None = None) -> str:
             from .gate import safe_id
             task = safe_id(read_json(active).get("task_id", ""))
             return selected(root, read_json(root / ".aidevflow/runs" / task / "run-state.json"))
+        discovery = root / ".aidevflow/active-discovery.json"
+        if discovery.is_file():
+            from .discovery import Discovery
+            return selected(root, Discovery(root).load()[0])
         name = project_config(root).get("runtime", "claude-code")
     if name not in NAMES:
         raise ValueError(f"Unsupported execution runtime: {name}")
@@ -49,7 +67,7 @@ def selected(root: Path, state: dict[str, Any] | None = None) -> str:
 def binding(root: Path) -> dict[str, Any]:
     name = project_config(root).get("runtime", "claude-code")
     return {"schema": "aidevflow/execution-binding-v1", "runtime": name,
-            "adapter_version": "omp-v1" if name == "omp" else "claude-observer-b2",
+            "adapter_version": adapter_version(name),
             "skills_root": project_config(root).get("skills_root", ".claude/skills")}
 
 
@@ -73,7 +91,7 @@ def skills_root(root: Path) -> Path:
 
 
 def recover(root: Path, session: str | None = None) -> dict[str, Any]:
-    if selected(root) == "omp":
+    if is_native(selected(root)):
         from .omp import recover as recover_omp
         return recover_omp(root, session)
     from .runtime import recover as recover_claude
@@ -81,7 +99,7 @@ def recover(root: Path, session: str | None = None) -> dict[str, Any]:
 
 
 def identity(name: str) -> dict[str, Any]:
-    executable = shutil.which("omp" if name == "omp" else "claude")
+    executable = shutil.which({"omp": "omp", "zscode": "zscode", "claude-code": "claude"}[name])
     version, error = None, None
     if executable:
         try:
@@ -95,7 +113,7 @@ def identity(name: str) -> dict[str, Any]:
             error = "version_probe_failed"
     return {"runtime": name, "executable": executable, "installed_version": version,
             "running_version": None, "version_probe_error": error,
-            "adapter_version": "omp-v1" if name == "omp" else "claude-observer-b2"}
+            "adapter_version": adapter_version(name)}
 
 
 def digest(value: Any) -> str:

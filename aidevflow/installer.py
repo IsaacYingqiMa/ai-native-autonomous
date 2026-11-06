@@ -14,9 +14,16 @@ def contract_example(source: Path, method_root: Path) -> Path:
     return source / ".aidevflow" / ("contract.legacy.example.json" if legacy else "contract.example.json")
 
 
-def install(source_root: Path, target_root: Path, runtime: str = "claude-code", *, skills_root: str | None = None, workflow_profile: str | None = None) -> dict[str, Any]:
+def install(source_root: Path, target_root: Path, runtime: str = "claude-code", *, skills_root: str | None = None, workflow_profile: str | None = None, upgrade_active: bool = False, extend_budgets: bool = False) -> dict[str, Any]:
+    if runtime == "zscode":
+        from .backends.zscode.installer import install as install_light
+        return install_light(source_root, target_root, skills_root=skills_root, workflow_profile=workflow_profile, upgrade_active=upgrade_active, extend_budgets=extend_budgets)
+    if extend_budgets:
+        raise GateError('--extend-budgets 只适用于 zscode light 安装')
+    if upgrade_active:
+        raise GateError('--upgrade-active 只适用于 zscode light 安装')
     if runtime == "omp":
-        return install_omp(source_root, target_root, skills_root=skills_root, workflow_profile=workflow_profile)
+        return install_omp(source_root, target_root, skills_root=skills_root, workflow_profile=workflow_profile, runtime=runtime)
     if workflow_profile not in (None, "legacy"):
         raise GateError("Reviewed discovery currently supports omp only")
     if runtime != "claude-code":
@@ -170,11 +177,14 @@ def install(source_root: Path, target_root: Path, runtime: str = "claude-code", 
     return {"target": str(target), "installed": installed, "settings_path": settings_path.relative_to(target).as_posix()}
 
 
-def install_omp(source_root: Path, target_root: Path, *, skills_root: str | None = None, workflow_profile: str | None = None) -> dict[str, Any]:
+def install_omp(source_root: Path, target_root: Path, *, skills_root: str | None = None, workflow_profile: str | None = None, runtime: str = "omp") -> dict[str, Any]:
     """Install native OMP assets without writing Claude or global OMP settings."""
     import subprocess
     import sys
-    from .runtimes import project_config
+    from .runtimes import project_config, config_dir, adapter_version, is_native
+    if not is_native(runtime):
+        raise GateError("Expected a native runtime")
+    native_dir = config_dir(runtime)
     source, target = source_root.resolve(), target_root.resolve()
     if source == target:
         raise GateError("AIDevFlow cannot install over its framework source directory")
@@ -182,6 +192,8 @@ def install_omp(source_root: Path, target_root: Path, *, skills_root: str | None
     if result.returncode or Path(result.stdout.strip()).resolve() != target:
         raise GateError("Install target must be the root of a Git repository")
     config = project_config(target)
+    if any((target / ".aidevflow" / name).exists() for name in ("active-discovery.json", "discovery-handoff.json")) and config.get("runtime") != runtime:
+        raise GateError("Cannot change runtime with an active discovery or handoff")
     from .method_resources import installation_root
     if workflow_profile not in (None, "legacy", "reviewed-discovery-v1"):
         raise GateError("Unsupported workflow_profile")
@@ -189,8 +201,8 @@ def install_omp(source_root: Path, target_root: Path, *, skills_root: str | None
         if any((target / ".aidevflow" / name).exists() for name in ("active-run.json", "active-discovery.json", "discovery-handoff.json")) and workflow_profile != config.get("workflow_profile", "legacy"):
             raise GateError("Cannot switch workflow profile with an active context")
         config["workflow_profile"] = workflow_profile
-    config["skills_root"] = installation_root(target, "omp", config, skills_root)
-    config.update(schema="aidevflow/project-v1", runtime="omp", python=sys.executable)
+    config["skills_root"] = installation_root(target, runtime, config, skills_root)
+    config.update(schema="aidevflow/project-v1", runtime=runtime, python=sys.executable)
     # Resolve and validate before copying any files. Vendor assets are not installed.
     method_root = (target / config["skills_root"]).resolve()
     method_root.relative_to(target)
@@ -198,7 +210,7 @@ def install_omp(source_root: Path, target_root: Path, *, skills_root: str | None
         raise GateError("skills_root must be inside the project")
     copies = [(source / "aidevflow", target / ".aidevflow/runtime/aidevflow"),
               (source / ".aidevflow/schemas", target / ".aidevflow/schemas"),
-              (source / "integrations/omp", target / ".omp/extensions/aidevflow")]
+              (source / "integrations/omp", target / f"{native_dir}/extensions/aidevflow")]
     for name in ("contract.legacy.example.json", "work-plan.example.json"):
         copies.append((source / ".aidevflow" / name, target / ".aidevflow" / name))
     copies.append((contract_example(source, method_root), target / ".aidevflow/contract.example.json"))
@@ -222,6 +234,10 @@ def install_omp(source_root: Path, target_root: Path, *, skills_root: str | None
         from .gate import replace_file_atomic
         import tempfile
         import os
+        if runtime == "zscode" and path.is_relative_to(target / native_dir):
+            text = text.replace(".omp/", ".zscode/").replace('const hostRuntime = "omp";', 'const hostRuntime = "zscode";')
+            if path.suffix == ".md":
+                text = text.replace("OMP", "zscode")
         path.resolve().relative_to(target)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(dir=path.parent)
@@ -255,7 +271,7 @@ def install_omp(source_root: Path, target_root: Path, *, skills_root: str | None
         header = (f"---\nname: aidevflow-{role}\ndescription: AIDevFlow {role}; read-only, exact JSON output.\n"
                   "tools: [read, grep, glob]\nblocking: true\nstructured: true\nadvisor: false\n"
                   "readSummarize: false\noutput: " + json.dumps(output_schema, ensure_ascii=False) + "\n---\n")
-        put(target / f".omp/agents/aidevflow-{role}.md", header + body +
+        put(target / f"{native_dir}/agents/aidevflow-{role}.md", header + body +
             '\nOMP transport: call the native yield tool as {"data": <the complete JSON object>}. '
             'The data envelope is transport only, not part of the role result. Do not call yield with '
             'schema/task_id/etc as top-level arguments, and never call yield with {}. Preserve actual '
@@ -322,7 +338,7 @@ See references/omp-capabilities.md for the plan format and actual argv.
                         "Use the Planner receipt result_path directly in `register-contract --draft <result_path>`.")
     flow = flow.replace("Save its exact JSON at `specs/aidevflow-intake/<TASK_ID>/verdict.json` and call `record-verdict`.",
                         "Use its immutable receipt result_path directly in `record-verdict --path <result_path>`.")
-    put(target / ".omp/skills/aidevflow-flow/SKILL.md", flow)
+    put(target / f"{native_dir}/skills/aidevflow-flow/SKILL.md", flow)
     for child in (source / ".claude/skills/aidevflow-flow/references").rglob("*"):
         if child.is_file():
             text = child.read_text(encoding="utf-8").replace("Claude coordinator", "OMP coordinator")
@@ -331,7 +347,7 @@ See references/omp-capabilities.md for the plan format and actual argv.
             text = text.replace("Project-local `.claude/skills` only in this first profile.",
                                 "Use the project-local skills_root pinned by Gate, including native `.omp/skills`.")
             text = text.replace("Missing browser MCP or real external access stays blocked", "Missing the managed Playwright browser capability or real external access stays blocked")
-            put(target / ".omp/skills/aidevflow-flow/references" / child.relative_to(source / ".claude/skills/aidevflow-flow/references"), text)
+            put(target / f"{native_dir}/skills/aidevflow-flow/references" / child.relative_to(source / ".claude/skills/aidevflow-flow/references"), text)
     for name, module, tail in (("aidevflow.py", "cli", "main()"),
                                ("aidevflow_bridge.py", "bridge", "serve(root)"),
                                ("aidevflow_browser.py", "browser", "main()")):
@@ -347,6 +363,7 @@ See references/omp-capabilities.md for the plan format and actual argv.
                ".omp/sessions/", ".omp/logs/", "!.omp/", "!.omp/extensions/", "!.omp/extensions/aidevflow/",
                "!.omp/extensions/aidevflow/**", "!.omp/agents/", "!.omp/agents/aidevflow-*.md",
                "!.omp/skills/", "!.omp/skills/aidevflow-flow/", "!.omp/skills/aidevflow-flow/**"]
+    ignores = [line.replace(".omp/", native_dir + "/") for line in ignores]
     ignore_path = target / ".gitignore"
     old = ignore_path.read_text(encoding="utf-8") if ignore_path.is_file() else ""
     extra = [line for line in ignores if line not in old.splitlines()]
@@ -356,9 +373,9 @@ See references/omp-capabilities.md for the plan format and actual argv.
         files[".gitignore"] = sha256_file(ignore_path)
     # Keep the other backend's owned assets in a mixed installation.
     all_files = {**previous.get("files", {}), **files}
-    write_json_atomic(manifest_path, {"schema": "aidevflow/install-manifest-v1", "runtime": "omp", "observer_version": "omp-v1",
+    write_json_atomic(manifest_path, {"schema": "aidevflow/install-manifest-v1", "runtime": runtime, "observer_version": adapter_version(runtime),
                                      "reliability_version": 4, "files": all_files})
-    return {"runtime": "omp", "target": str(target), "installed": sorted(files), "settings_path": ".aidevflow/project.json"}
+    return {"runtime": runtime, "target": str(target), "installed": sorted(files), "settings_path": ".aidevflow/project.json"}
 
 
 def merge_settings(target: dict[str, Any], source: dict[str, Any]) -> None:
