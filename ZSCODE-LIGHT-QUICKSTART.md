@@ -7,7 +7,7 @@
 需要Python 3.11+、Git、已配置可用模型的zscode。业务项目与框架分开并有初始Git提交。安装器不代替用户提交。
 
 ```powershell
-python D:\InspurCode\ai-native-autonomous\scripts\aidevflow.py --root D:\Work\my-project install --runtime zscode
+python D:\inspur\code\spec-driven\ai-native-autonomous\scripts\aidevflow.py --root D:\Work\my-project install --runtime zscode
 Set-Location D:\Work\my-project
 zscode
 ```
@@ -63,7 +63,7 @@ zscode
 在 `.aidevflow/project.json` 的 `progress_limits` 配置 providers/reads/seconds，在 `failure_limits` 配置 operation_warning/operation_repeats/operation_total/execution_failures/baseline_reviews/verification_failures/repair_rounds。均为正整数，operation_warning < operation_repeats <= operation_total。普通升级保留自定义值；需要将已有项目提高到新默认额度时，关闭旧 zscode 后执行：
 
 ```powershell
-python D:\InspurCode\ai-native-autonomous\scripts\aidevflow.py --root D:\InspurCode\ai-native-zscode install --runtime zscode --upgrade-active --extend-budgets
+python D:\inspur\code\spec-driven\ai-native-autonomous\scripts\aidevflow.py --root D:\Work\my-project install --runtime zscode --upgrade-active --extend-budgets
 ```
 
 安装器备份活动检查点和旧安装，保留高于新默认的自定义额度，不自动恢复已停止任务。重启后使用 `/aidevflow-flow 继续`。

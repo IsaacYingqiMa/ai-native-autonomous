@@ -49,12 +49,12 @@ omp --version
 
 ## 3. 准备业务项目，和套件源码分开
 
-套件源码目录是 `D:\InspurCode\ai-native-autonomous`。业务代码放在另一个目录，例如 `D:\Work\aidevflow-pilot`。
+套件源码目录是 `D:\inspur\code\spec-driven\ai-native-autonomous`。业务代码放在另一个目录，例如 `D:\Work\aidevflow-pilot`。
 
 以后每次打开新的 PowerShell 窗口，先设置这两个变量；业务项目路径按实际修改：
 
 ```powershell
-$AidevflowSource = 'D:\InspurCode\ai-native-autonomous'
+$AidevflowSource = 'D:\inspur\code\spec-driven\ai-native-autonomous'
 $AidevflowProject = 'D:\Work\aidevflow-pilot'
 ```
 

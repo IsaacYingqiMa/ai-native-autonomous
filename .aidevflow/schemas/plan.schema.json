@@ -36,6 +36,7 @@
               "red",
               "green",
               "refactor",
+              "build",
               "regression"
             ]
           },

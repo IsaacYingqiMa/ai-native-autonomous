@@ -187,7 +187,7 @@ class RepairLifecycleTests(unittest.TestCase):
         (self.root / 'src/sample.py').write_text('def one(): return 1\ndef two(): return 0\n', encoding='utf8')
         self.gate.run(); self.f.write_test(2)
         path = self.draft('g2.py', (self.root / 'tests/test_2.py').read_text('utf8') + '# clarified\n')
-        spec = self.draft('spec.json', {'content': w.SPEC.replace('## 知识缺口', '说明：保持原业务约定。\n## 知识缺口'), 'acceptance_map': w.MAP})
+        spec = self.draft('spec.json', {'content': w.SPEC.replace('## 边界', '说明：保持原业务约定。\n## 边界'), 'acceptance_map': w.MAP})
         proposal = self.draft('derived.json', {'reason': 'Clarify next RED before its first execution', 'group': 'G2',
             'changes': {'tests/test_2.py': path}, 'spec_path': spec})
         self.gate.propose_repair(proposal)

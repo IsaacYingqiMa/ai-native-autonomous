@@ -7,7 +7,7 @@
 业务项目需要 Git 初始提交、Python 3.11+、已配置可用模型的 zscode。
 
 ```powershell
-python D:\InspurCode\ai-native-autonomous\scripts\aidevflow.py --root D:\Work\my-project install --runtime zscode
+python D:\inspur\code\spec-driven\ai-native-autonomous\scripts\aidevflow.py --root D:\Work\my-project install --runtime zscode
 Set-Location D:\Work\my-project
 zscode
 ```
@@ -46,3 +46,5 @@ python -B tests/zscode_light_smoke.py
 2.4 增加受审查的派生规格/计划修订、全量回归自动回修、知识提案与真实检查附件；未冻结测试可直接纠正重审，已有 RED 基线保留。业务矛盾使用 report_conflict 持久化停止，不等待预算耗尽。实现与验证状态见 [修复记录](ZSCODE-LIGHT-REPAIR-RESULTS.md)。
 
 2.4.2 补齐修订预检/应用失败后的恢复，按候选复用审查并阻止重复派发，保存失败重放证据，支持旧循环停点迁移。状态返回实际可执行的 phase/next_action；已批准候选直接应用，失败候选修改后重提，详见 [恢复契约](ZSCODE-LIGHT-REPAIR-LIFECYCLE.md)。
+
+2.4.3 适配 zsspec v2.0 方法包：Gate 同时接受 v2.0（需求/边界/规格/设计/记录，冲突声明为「记录」子段且必须为"无"）与 legacy light 2.4 规格结构；新增 `build` 任务类型承接非测试任务卡（构建/运行核验/达标，跑通即完成、不得触碰冻结测试），测试卡仍走 RED/GREEN 配对。映射规则见 [flow 集成](integrations/zscode/flow.md)。

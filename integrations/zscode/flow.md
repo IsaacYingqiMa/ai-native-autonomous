@@ -1,8 +1,17 @@
-# AIDevFlow + zsspec-light 2.4.2
+# AIDevFlow + zsspec-light 2.4.2（zsspec v2.0 方法包）
 
 入口讨论 → Intent/PRD 用户审查 → 自主规格/设计/计划/TDD/修订 → 原生独立验收 → 最终用户审查 → 自动归档。公开命令仅 /aidevflow-flow、/aidevflow-discover。Git 提交不作为完成条件。
 
 先 status，按 skill_path 读取当前阶段方法。工程规则归属五个 zsspec-light skill；Gate 的状态与证据为权威。已有任务继续当前检查点。
+
+## zsspec v2.0 方法映射
+
+五个 zsspec skill 是批准后的研发方法；Gate 托管状态、证据与独立验收。材料结构按 v2.0 模板提交：
+
+- **init**：status.knowledge.initialized 为 false 时（每项目一次），discovery/spec 阶段先按 skill_path 读取 zsspec-init——核实源码后生成 specs/MAP.md 与 specs/modules/，通过 submit kind=knowledge 登记并完成初始化；已初始化的项目不再重复执行。此后运行中的知识更新只走提案，归档时生效。
+- **spec**：content 按 zsspec-spec 模板五段（需求/边界/规格/设计/记录）产出真实内容；每条 Sx 规格含做什么/规则（触发→结果箭头断言）/用例（可选表）/验证（四写法之一）/依据；「记录 · 冲突声明」必须为"无"才能提交。acceptance_map 仍须把每条 Sx 精确映射到 Intent/PRD 已批准验收 ID 并完整覆盖，禁止缩小批准范围。
+- **plan**：v2.0 任务卡映射到 Gate 任务类型——**默认走 kind=build**：验证写法为构建/运行核验/达标的卡直接提交 build（group=所属 Sx，files=该卡实现文件，argv=验证命令，跑通即完成，无 regression 字段），不要为它们制造测试；仅当卡的验证写法为测试或用户点名测试时才拆 RED+GREEN 对（同 group 同验证命令，先断言失败后全绿；GREEN/REFACTOR 任务必须携带 `regression` 字段：组内回归命令的非空 argv 字符串数组，通常与本组 RED 的 argv 相同，GREEN 通过后立即重放）；P1 测试设施准备映射 prepare（仅当需要测试设施且在最前）。**全量回归收尾仅当计划含测试卡**（R1 映射最后一项 regression，files 为空，argv 重放全部验证）；纯构建/核验计划无需 R1，最后一项达标卡跑通即封版进入独立验收。每个 group 的 RED 必须有对应 GREEN；测试文件一经所属 RED 冻结，后续任何任务（含 build）不得再修改；测试文件与实现文件必须分离且互不重合。
+
 
 ## 模型工具
 只接受扁平字符串字段，不传 data、value 或内联对象。

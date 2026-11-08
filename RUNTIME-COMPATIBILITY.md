@@ -58,7 +58,7 @@ python scripts/aidevflow.py continuation --owner manual
 仅在你自己确认项目内容不需要保留后清理；本次修复不执行清理。保留/重新初始化 Git，并先有初始提交。从源码安装：
 
 ```powershell
-python -B D:\InspurCode\ai-native-autonomous\scripts\aidevflow.py --root D:\InspurCode\ai-native-dashboard install
+python -B D:\inspur\code\spec-driven\ai-native-autonomous\scripts\aidevflow.py --root D:\InspurCode\ai-native-dashboard install
 ```
 
 手工安装完整 zsspec v1.4 方法资产，退出并重启 Claude Code。先完成前后端空应用、依赖/浏览器和测试命令准备，再输入 `/aidevflow-flow` 与原始看板需求。无需自己编写 Contract 或注入测试观察。

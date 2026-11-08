@@ -21,7 +21,7 @@ omp --version
 在同一个 PowerShell 窗口按顺序执行。下面的业务目录应尚不存在；如果已经存在，请换一个新名称。
 
 ```powershell
-$AidevflowSource = 'D:\InspurCode\ai-native-autonomous'
+$AidevflowSource = 'D:\inspur\code\spec-driven\ai-native-autonomous'
 $AidevflowProject = 'D:\Work\aidevflow-first-run'
 
 if (-not (Test-Path -LiteralPath (Join-Path $AidevflowSource 'scripts\aidevflow.py'))) {
@@ -253,7 +253,7 @@ python scripts/aidevflow.py archive
 这是一次真实模型的小型模块试点，不覆盖前端浏览器、数据库或复杂企业集成。可选的无模型框架测试在源码目录执行：
 
 ```powershell
-Set-Location D:\InspurCode\ai-native-autonomous
+Set-Location D:\inspur\code\spec-driven\ai-native-autonomous
 python -B -m unittest discover -s tests -p test_method_v2.py -v
 python -B tests/omp_native_smoke.py
 python -B tests/omp_review_smoke.py

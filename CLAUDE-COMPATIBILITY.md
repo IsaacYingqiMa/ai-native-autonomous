@@ -54,7 +54,7 @@ Hook 和哈希是本机流程完整性措施，不构成操作系统沙箱或抵
 打开 PowerShell：
 
 ```powershell
-Set-Location "D:\InspurCode\ai-native-autonomous"
+Set-Location "D:\inspur\code\spec-driven\ai-native-autonomous"
 python --version
 git --version
 claude --version
@@ -95,7 +95,7 @@ Write-Host "备份位置：$adfBackup"
 执行安装：
 
 ```powershell
-python -B "D:\InspurCode\ai-native-autonomous\scripts\aidevflow.py" `
+python -B "D:\inspur\code\spec-driven\ai-native-autonomous\scripts\aidevflow.py" `
   --root "D:\InspurCode\zdata-agent-starter" install
 if ($LASTEXITCODE -ne 0) { throw "安装失败，先处理诊断，不继续业务任务。" }
 

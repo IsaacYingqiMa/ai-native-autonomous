@@ -381,7 +381,8 @@ class LightReview:
         state['repair_feedback'] = reason
         # Reopen implementation tasks even at the budget boundary so a later
         # user-authorized recovery always has a valid editable cursor.
-        cursor = next(i for i, t in enumerate(state['tasks']) if t['kind'] == 'green')
+        cursor = next((i for i, t in enumerate(state['tasks']) if t['kind'] in ('green', 'refactor', 'build')),
+                      next((i for i, t in enumerate(state['tasks']) if t['kind'] != 'prepare'), 0))
         state.setdefault('execution_history', []).append({'source': source, 'reason': reason,
             'tasks': json.loads(json.dumps(state['tasks'])), 'candidate': state.get('final_candidate')})
         for task in state['tasks'][cursor:]:

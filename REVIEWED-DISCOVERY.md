@@ -7,7 +7,7 @@
 在没有活动任务/需求讨论的业务项目中，从框架源码安装：
 
 ```powershell
-python -B 'D:\InspurCode\ai-native-autonomous\scripts\aidevflow.py' --root 'D:\Work\my-project' install --runtime omp --skills-root .omp/skills --workflow-profile reviewed-discovery-v1
+python -B 'D:\inspur\code\spec-driven\ai-native-autonomous\scripts\aidevflow.py' --root 'D:\Work\my-project' install --runtime omp --skills-root .omp/skills --workflow-profile reviewed-discovery-v1
 ```
 
 保留原有方法包。安装后重启 omp，执行 `/aidevflow-doctor`，确认 read、bash、task 和需求角色可用。新 profile 暂不支持 Claude；活动上下文存在时不能切换 profile。

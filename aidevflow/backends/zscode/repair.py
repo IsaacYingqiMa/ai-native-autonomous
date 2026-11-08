@@ -177,7 +177,7 @@ class BaselineRepair:
         updates = value.get('implementation_files', {})
         if not isinstance(updates, dict): raise GateError('implementation_files 必须为任务ID到路径列表的对象')
         for ident, paths in updates.items():
-            target = next((t for t in plan if t['id'] == ident and t.get('group') == group and t['kind'] in ('green', 'refactor')), None)
+            target = next((t for t in plan if t['id'] == ident and t.get('group') == group and t['kind'] in ('green', 'refactor', 'build')), None)
             if target is None or not isinstance(paths, list) or not paths: raise GateError('仅可纠正当前工作项实现文件列表')
             for rel in paths:
                 p = self.path(rel);normalized = p.relative_to(self.root).as_posix()
@@ -307,7 +307,7 @@ class BaselineRepair:
     def capture_red_origin(self, state, run, group):
         origins = state.setdefault('red_origins', {})
         if group in origins: return
-        paths = {f for t in state['tasks'] if t.get('group') == group and t['kind'] in ('green', 'refactor') for f in t['files']}
+        paths = {f for t in state['tasks'] if t.get('group') == group and t['kind'] in ('green', 'refactor', 'build') for f in t['files']}
         # Preserve the whole source workspace at the successful RED, not later tests or implementations.
         paths.update(self.candidate_files())
         refs = {}
@@ -338,10 +338,10 @@ class BaselineRepair:
             # Dependency installation belongs to preparation; replay never calls an installer.
             if (self.root / 'node_modules').is_dir(): shutil.copytree(self.root / 'node_modules', target / 'node_modules')
             origins = state.get('red_origins', {}).get(group)
-            paths = {f for t in plan if t.get('group') == group and t['kind'] in ('green', 'refactor') for f in t['files']}
+            paths = {f for t in plan if t.get('group') == group and t['kind'] in ('green', 'refactor', 'build') for f in t['files']}
             if full_snapshot: origins = {**origins, **{p: None for p in paths - set(origins)}}
             if origins is None or paths - set(origins):
-                if any(t.get('completed') and t.get('group') != group and set(t['files']) & paths for t in plan if t['kind'] in ('green', 'refactor')): raise GateError('旧任务缺少该工作项原始实现快照，不能伪造 RED 重放')
+                if any(t.get('completed') and t.get('group') != group and set(t['files']) & paths for t in plan if t['kind'] in ('green', 'refactor', 'build')): raise GateError('旧任务缺少该工作项原始实现快照，不能伪造 RED 重放')
                 origins = dict(origins or {})
                 for rel in paths - set(origins):
                     p = subprocess.run(['git', '-c', 'core.fsmonitor=false', 'show', state['base_commit'] + ':' + rel], cwd=self.root, capture_output=True, timeout=15)
@@ -413,7 +413,7 @@ class BaselineRepair:
             # This RED was never accepted. Its original workspace is the current pre-GREEN workspace,
             # including earlier completed groups; restoring the repository base would erase that work.
             group = current['group']
-            if current.get('result', {}).get('status') != 'failed' or any(t.get('completed') and t.get('group') == group and t['kind'] in ('green', 'refactor') for t in state['tasks']):
+            if current.get('result', {}).get('status') != 'failed' or any(t.get('completed') and t.get('group') == group and t['kind'] in ('green', 'refactor', 'build') for t in state['tasks']):
                 raise GateError('未通过 RED 的准备修订需要真实失败，且本组 GREEN 尚未执行')
             state.setdefault('red_origins', {}).pop(group, None)
             state['red_snapshot_groups'] = [g for g in state.get('red_snapshot_groups', []) if g != group]
@@ -424,7 +424,8 @@ class BaselineRepair:
         for g in proposal['affected']:
             after['baselines'][g].update({p: sha256_bytes(c.encode()) for p, c in proposal['changes'].items() if p in after['baselines'][g]})
             red = next(t for t in after['tasks'] if t.get('group') == g and t['kind'] == 'red');red.update(completed=True, result=proofs[g])
-        cursor = min(i for i, t in enumerate(after['tasks']) if t.get('group') in proposal['affected'] and t['kind'] == 'green')
+        cursor = min((i for i, t in enumerate(after['tasks']) if t.get('group') in proposal['affected'] and t['kind'] != 'red'),
+                     default=next((i for i, t in enumerate(after['tasks']) if t.get('group') in proposal['affected']), 0))
         for t in after['tasks'][cursor:]:
             if t['kind'] != 'red': t.pop('completed', None);t.pop('result', None);t['consecutive_failures'] = 0
         after.update(stage='applying', cursor=cursor, baseline_version=state.get('baseline_version', 0) + 1, baseline_attempts=0)

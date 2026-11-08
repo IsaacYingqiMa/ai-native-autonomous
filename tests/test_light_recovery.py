@@ -180,7 +180,7 @@ class LightRecoveryTests(unittest.TestCase):
 
     def test_inconsistent_spec_path_can_be_fixed_before_plan_is_frozen(self):
         self.f.entry()
-        self.gate.spec(workflow.SPEC.replace('## 已剔除', '实现：src/incorrect.ts\n\n## 已剔除'), workflow.MAP)
+        self.gate.spec(workflow.SPEC.replace('## 边界', '实现：src/incorrect.ts\n\n## 边界'), workflow.MAP)
         with self.assertRaisesRegex(GateError, '规格路径与计划不一致'): self.gate.plan(self.f.tasks)
         self.assertEqual(self.gate.status()['stage'], 'plan')
         self.gate.spec(workflow.SPEC, workflow.MAP)

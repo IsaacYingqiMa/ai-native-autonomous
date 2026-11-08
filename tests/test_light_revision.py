@@ -42,7 +42,7 @@ class RevisionTests(unittest.TestCase):
     def test_initial_derived_revision_preserves_approval_and_requires_new_red(self):
         self.f.begin(); self.f.write_test(1); self.gate.prepare_baseline(); self.f.baseline_review('revise')
         before = self.gate.status()
-        spec = self.draft('spec-fixed.json', {'content': w.SPEC.replace('## 知识缺口', '说明：保持原业务约定。\n## 知识缺口'), 'acceptance_map': w.MAP})
+        spec = self.draft('spec-fixed.json', {'content': w.SPEC.replace('## 边界', '说明：保持原业务约定。\n## 边界'), 'acceptance_map': w.MAP})
         proposal = self.draft('repair.json', {'reason': 'Correct derived design', 'group': 'G1', 'changes': {}, 'spec_path': spec})
         self.gate.propose_repair(proposal); self.f.baseline_review()
         s = self.gate.apply_repair()
@@ -133,7 +133,7 @@ class RevisionTests(unittest.TestCase):
 
     def prepare_revision(self):
         self.f.begin(); self.f.write_test(1)
-        spec = self.draft('spec-fixed.json', {'content': w.SPEC.replace('## 知识缺口', '说明\n## 知识缺口'), 'acceptance_map': w.MAP})
+        spec = self.draft('spec-fixed.json', {'content': w.SPEC.replace('## 边界', '说明\n## 边界'), 'acceptance_map': w.MAP})
         proposal = self.draft('repair.json', {'reason': 'Derived clarification', 'group': 'G1', 'changes': {}, 'spec_path': spec})
         self.gate.propose_repair(proposal); self.f.baseline_review()
         return proposal

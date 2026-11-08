@@ -55,7 +55,7 @@ class DerivedRevision:
             if {m['id'] for m in design['modules']} != {t['group'] for t in tasks if t.get('group')}:
                 raise GateError('设计模块必须精确对应计划 group')
             for m in design['modules']:
-                for kinds, key in ((('red',), 'test_files'), (('green', 'refactor'), 'implementation_files')):
+                for kinds, key in ((('red',), 'test_files'), (('green', 'refactor', 'build'), 'implementation_files')):
                     actual = {self.canonical_file(f) for t in tasks if t.get('group') == m['id'] and t['kind'] in kinds for f in t['files']}
                     if actual != {self.canonical_file(f) for f in m[key]}:
                         raise WorkflowError('PATH_LAYOUT', '规格路径与计划不一致：' + m['id'] + '/' + key)

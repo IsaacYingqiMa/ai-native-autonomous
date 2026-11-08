@@ -171,11 +171,15 @@ class LightGate(RepairLifecycle, DerivedRevision, BaselineRepair, Progress, Ligh
         fresh = state.get('final_candidate') == self.candidate() if state.get('final_candidate') else None
         skills = {'discovery': 'zsspec-init' if not (self.control / 'light-knowledge.json').exists() else None, 'spec': 'zsspec-spec', 'plan': 'zsspec-plan', 'applying': 'zsspec-apply',
                   'repairing': 'zsspec-apply', 'verify': 'zsspec-apply', 'delivery_ready': None, 'done': 'zsspec-archive', 'finalizing': 'zsspec-archive'}
+        # zsspec v2.0 init runs once per project: steer the model to initialize knowledge
+        # (MAP.md/modules) before requirements analysis; the window closes after spec.
+        init_step = ('知识未初始化：先按 skill_path 读取 zsspec-init 核实源码，生成 specs/MAP.md 与 specs/modules/ 后 submit kind=knowledge；'
+                     if skills.get('discovery') == 'zsspec-init' else '')
         route = self.baseline_route(state) if state.get('baseline_review') else None
         result = {**state, 'blocking_questions': self.blocking_questions(state), 'current_task': task, 'regression_fresh': fresh, 'skill': skills.get(state['stage']),
-                'next_action': {'discovery': 'requirements_context 派发需求分析；完成后 submit requirements 结果路径，等待入口审查',
-                                'spec': '依据已批准 Intent/PRD 自动生成 light 规格及验收映射，无需再次人工批准',
-                                'plan': '自动提交 TDD 计划', 'applying': '当前 RED 先 prepare_baseline 并原生审查，再 run；GREEN 失败先诊断，冻结测试有错用 repair_propose，不能直接改写',
+                'next_action': {'discovery': init_step + 'requirements_context 派发需求分析；完成后 submit requirements 结果路径，等待入口审查',
+                                'spec': '依据已批准 Intent/PRD 按 zsspec v2.0 模板生成规格（需求/边界/规格/设计/记录）及验收映射，无需再次人工批准' + init_step,
+                                'plan': '自动提交任务计划：测试卡映射 RED/GREEN，构建/核验/达标卡映射 BUILD，末项为全量回归', 'applying': '测试准备（RED）先 prepare_baseline 并原生审查，再 run；GREEN/BUILD 失败先诊断并修改当前 files 后 run；冻结测试有错用 repair_propose，不能直接改写',
                                 'repairing': 'baseline_context 派发原生基线审查；approve 后 repair_apply，隔离重放 RED 并重新执行 GREEN/全量回归',
                                 'verify': '自动 prepare_verifier 并通过原生 task 派发独立验收，不可自签结论',
                                 'delivery_ready': '独立验收已通过，自动展示最终产物审查；flow 可重新打开',
@@ -229,16 +233,25 @@ class LightGate(RepairLifecycle, DerivedRevision, BaselineRepair, Progress, Ligh
         return self.status()
 
     def spec_definition(self, state, content, acceptance_map, design=None):
-        for heading in ('需求', '规格', '已剔除', '知识缺口', 'knowledge 修正项', '冲突声明'):
-            if f'## {heading}' not in content:
-                raise GateError('规格缺少章节：' + heading)
+        # zsspec v2.0 specs use 需求/边界/规格/设计/记录 with 做什么/规则/用例/验证/依据 items;
+        # legacy light 2.4 tasks keep their original WHEN/SHALL sections for pinned revisions.
+        legacy = ('需求', '规格', '已剔除', '知识缺口', 'knowledge 修正项', '冲突声明')
+        modern = ('需求', '边界', '规格', '设计', '记录')
+        if all(f'## {heading}' in content for heading in modern):
+            v2 = True
+        elif all(f'## {heading}' in content for heading in legacy):
+            v2 = False
+        else:
+            raise GateError('规格需要完整章节：zsspec v2.0（需求/边界/规格/设计/记录）或 legacy（需求/规格/已剔除/知识缺口/knowledge 修正项/冲突声明）')
         ids = re.findall(r'^### (S\d+)\b', content, re.M)
         if not ids or len(set(ids)) != len(ids):
             raise GateError('规格需要唯一 S1、S2 等编号')
+        required = ('- 做什么', '- 验证', '- 依据') if v2 else ('WHEN', 'THE SYSTEM SHALL', '验收：', '覆盖需求：')
         for block in re.split(r'^### S\d+\b', content, flags=re.M)[1:]:
-            if not all(term in block for term in ('WHEN', 'THE SYSTEM SHALL', '验收：', '覆盖需求：')):
-                raise GateError('每条规格需要 WHEN/SHALL、验收及覆盖需求')
-        conflict = content.split('## 冲突声明', 1)[1].split('\n## ', 1)[0].strip()
+            if not all(term in block for term in required):
+                raise GateError('每条规格需要 ' + ('做什么/验证/依据（zsspec v2.0）' if v2 else 'WHEN/SHALL、验收及覆盖需求'))
+        section = '### 冲突声明' if v2 else '## 冲突声明'
+        conflict = content.split(section, 1)[1].split('\n### ', 1)[0].split('\n## ', 1)[0].strip()
         if conflict != '无':
             raise GateError('冲突声明尚未解决，不能提交待批准规格')
         approved = {a for req in state['requirements']['value']['requirements'] for a in req['acceptance_ids']}
@@ -255,9 +268,9 @@ class LightGate(RepairLifecycle, DerivedRevision, BaselineRepair, Progress, Ligh
         return definition
 
     @staticmethod
-    def command(argv):
+    def command(argv, where='验证命令'):
         if not isinstance(argv, list) or not argv or any(not isinstance(x, str) or not x or '\x00' in x for x in argv):
-            raise GateError('验证命令必须为非空 argv 字符串数组')
+            raise GateError(where + '必须为非空 argv 字符串数组')
 
     @writes
     def plan(self, tasks: list):
@@ -278,8 +291,8 @@ class LightGate(RepairLifecycle, DerivedRevision, BaselineRepair, Progress, Ligh
         all_tests = set()
         file_key = lambda f: f.casefold() if os.name == 'nt' else f
         for i, task in enumerate(tasks):
-            if not isinstance(task, dict) or task.get('kind') not in ('prepare', 'red', 'green', 'refactor', 'regression'):
-                raise GateError('任务 kind 必须为 prepare/red/green/refactor/regression')
+            if not isinstance(task, dict) or task.get('kind') not in ('prepare', 'red', 'green', 'refactor', 'build', 'regression'):
+                raise GateError('任务 kind 必须为 prepare/red/green/refactor/build/regression')
             ident = task.get('id', '')
             if not re.fullmatch(r'\d+\.\d+', ident) or ident in ids or not task.get('title', '').strip():
                 raise GateError('任务需要唯一数字编号与标题')
@@ -288,7 +301,7 @@ class LightGate(RepairLifecycle, DerivedRevision, BaselineRepair, Progress, Ligh
             if not isinstance(refs, list) or not refs or set(refs) - set(state['spec']['ids']):
                 raise GateError('每项任务必须引用已批准的 Sx')
             covered.update(refs)
-            self.command(task.get('argv'))
+            self.command(task.get('argv'), f'任务 {ident} 的验证命令(argv)')
             files = task.get('files')
             if not isinstance(files, list) or any(not isinstance(f, str) for f in files):
                 raise GateError('任务需要精确 files 列表')
@@ -307,7 +320,7 @@ class LightGate(RepairLifecycle, DerivedRevision, BaselineRepair, Progress, Ligh
                     raise GateError('检查需要 id/kind/specs/argv/evidence_paths')
                 if not isinstance(check['id'], str) or not check['id'] or check['id'] in check_ids or check['kind'] not in ('http', 'browser', 'static'):
                     raise GateError('检查需要唯一 ID 与 http/browser/static kind')
-                check_ids.add(check['id']); self.command(check['argv'])
+                check_ids.add(check['id']); self.command(check['argv'], f"检查 {check['id']} 的命令")
                 if not isinstance(check['specs'], list) or not check['specs'] or set(check['specs']) - set(state['spec']['ids']): raise GateError('检查必须引用已批准规格')
                 if not isinstance(check['evidence_paths'], list) or not check['evidence_paths']:
                     raise GateError('附加检查需要非空 evidence_paths，由 runner 每次生成真实证据')
@@ -320,7 +333,7 @@ class LightGate(RepairLifecycle, DerivedRevision, BaselineRepair, Progress, Ligh
                 if i != len(tasks) - 1 or files:
                     raise GateError('全量回归必须是最后一项，files 为空')
             elif not group or not files:
-                raise GateError('RED/GREEN/REFACTOR 需要 group 和精确修改文件')
+                raise GateError('RED/GREEN/REFACTOR/BUILD 需要 group 和精确修改文件')
             if kind == 'red':
                 if group in groups:
                     raise GateError('每个 group 只能有一个 RED')
@@ -336,11 +349,21 @@ class LightGate(RepairLifecycle, DerivedRevision, BaselineRepair, Progress, Ligh
                 if kind == 'refactor' and not groups[group]['green']:
                     raise GateError('REFACTOR 必须在 GREEN 之后')
                 groups[group]['green'] = True
-                self.command(task.get('regression'))
+                if not isinstance(task.get('regression'), list) or not task['regression']:
+                    raise GateError(f'任务 {task["id"]}({kind}) 缺少 regression：GREEN 通过后立即重放的组内回归命令'
+                                    '（非空 argv 字符串数组，通常与本组 RED 的 argv 相同）')
+                self.command(task['regression'], f'任务 {task["id"]} 的 regression')
+            elif kind == 'build':
+                # zsspec v2.0 non-test cards: implement then verify once (构建/运行核验/达标).
+                if set(map(file_key, files)).intersection(all_tests):
+                    raise GateError('BUILD 任务不能修改任何已冻结测试文件')
             clean.append({k: task[k] for k in ('id', 'title', 'kind', 'argv', 'files', 'specs', 'group', 'regression', 'checks') if k in task})
-        if covered != set(state['spec']['ids']) or not groups or any(not g['green'] for g in groups.values()) or clean[-1]['kind'] != 'regression':
-            raise GateError('计划必须覆盖全部规格、完整 RED/GREEN，并以全量回归结束')
-        all_impl = {file_key(f) for t in clean if t['kind'] in ('green', 'refactor') for f in t['files']}
+        executable = [t for t in clean if t['kind'] != 'regression']
+        if covered != set(state['spec']['ids']) or not executable or any(not g['green'] for g in groups.values()):
+            raise GateError('计划必须覆盖全部规格；测试任务需要完整 RED/GREEN')
+        if any(t['kind'] in ('red', 'green', 'refactor') for t in clean) and clean[-1]['kind'] != 'regression':
+            raise GateError('含测试卡的计划必须以全量回归收尾；纯构建/核验计划（无测试卡）以最后一项达标卡收尾，跑通即进入独立验收')
+        all_impl = {file_key(f) for t in clean if t['kind'] in ('green', 'refactor', 'build') for f in t['files']}
         if all_impl.intersection(all_tests):
             raise GateError('测试文件不能同时声明为实现文件')
         self.validate_layout(state['spec'], clean)
@@ -464,7 +487,8 @@ class LightGate(RepairLifecycle, DerivedRevision, BaselineRepair, Progress, Ligh
         task['result'] = {'status': 'passed' if ok else 'failed', 'exit_code': records[-1]['exit_code'],
                           'path': evidence_path.relative_to(self.root).as_posix(), 'sha256': sha256_file(evidence_path),
                           'counts': records[-1]['counts']}
-        if ok and task['kind'] == 'regression':
+        if ok and (task['kind'] == 'regression' or state['cursor'] == len(state['tasks']) - 1):
+            # Regression seals a test-bearing plan; a pure build plan is sealed by its final 达标 card.
             task['consecutive_failures'] = 0
             task['completed'] = True
             state.update(stage='verify', final_candidate=after, cursor=len(state['tasks']))

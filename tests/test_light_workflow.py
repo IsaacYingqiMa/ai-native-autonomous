@@ -13,7 +13,7 @@ from unittest.mock import patch
 from aidevflow.storage import GateError, read_json, sha256_bytes, sha256_file, write_json_atomic
 from aidevflow.backends.zscode.installer import install
 from aidevflow.backends.zscode.engine import LightGate, PROFILE, doctor
-from aidevflow.backends.zscode.bridge import dispatch
+from aidevflow.backends.zscode.bridge import dispatch, model_operation
 from aidevflow.backends.zscode.review import digest, VERIFIER
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -28,6 +28,77 @@ REQUIREMENTS = {'schema': 'aidevflow/requirements-v1',
     'scenarios': [{'id': 'SC1', 'requirement_ids': ['R1'], 'acceptance_ids': ['AC-1', 'AC-2'],
                    'given': 'A caller', 'when': 'functions called', 'then': 'one and two returned'}]}
 SPEC = '''# 规格：整数值
+
+## 需求
+
+- **问题**：当前实现返回错误整数，调用者计算结果失败
+- **不做的后果**：one/two 调用者结果错误，下游计算失败
+- **期望结果**：one() 返回 1、two() 返回 2
+- **约束**：Python 标准库 unittest 验证
+- **受影响模块**：sample
+
+## 边界
+
+- 做：修正 src/sample.py 两个函数返回值
+- 不做：新增函数（超出本变更范围）
+
+## 规格
+
+### S1 返回一
+
+- 做什么：one() 返回整数 1
+- 规则：
+  - 调用 one() → 返回 1
+- 用例：
+  | # | 场景 | 输入 | 期望 |
+  |---|---|---|---|
+  | 1 | 正常调用 | 无参数 | 返回 1 |
+- 验证：`python -m unittest discover -s tests` → 全绿（用户点名测试锁定）
+- 依据：`src/sample.py::one` · 覆盖：期望结果
+
+### S2 返回二
+
+- 做什么：two() 返回整数 2
+- 规则：
+  - 调用 two() → 返回 2
+- 用例：
+  | # | 场景 | 输入 | 期望 |
+  |---|---|---|---|
+  | 1 | 正常调用 | 无参数 | 返回 2 |
+- 验证：`python -m unittest discover -s tests` → 全绿（用户点名测试锁定）
+- 依据：`src/sample.py::two` · 覆盖：期望结果
+
+## 设计
+
+### 方案
+
+直接修正两个函数的返回值。
+
+### 模块与接口
+
+- 修改：`src/sample.py::one` ← 依据：`src/sample.py::one`
+- 修改：`src/sample.py::two` ← 依据：`src/sample.py::two`
+
+### 数据与状态
+
+无
+
+### 取舍
+
+无
+
+## 记录
+
+### 知识维护
+
+无
+
+### 冲突声明
+
+无
+'''
+
+LEGACY_SPEC = '''# 规格：整数值
 ## 需求
 返回正确整数；不做则调用者结果错误。
 ## 规格
@@ -139,7 +210,7 @@ class LightWorkflowTests(unittest.TestCase):
     def accept(self, candidate, by):
         return self.gate.confirm(candidate, by, self.gate.status().get('verifier_bundle', {}).get('sha256'))
 
-    def witness(self, decision='pass', files=None, call=None, finish=True):
+    def witness(self, decision='pass', files=None, call=None, finish=True, ids=('S1', 'S2')):
         files = {'specs/modules/sample.md': '# sample\n返回一和二\n'} if files is None else files
         prepared = self.gate.prepare_verifier(files)
         prepared = self.gate.verifier_assignment()
@@ -153,7 +224,7 @@ class LightWorkflowTests(unittest.TestCase):
         value = {'schema': 'aidevflow/light-verdict-v1', 'run_id': state['run_id'],
                  'bundle_sha256': prepared['sha256'], 'decision': decision, 'reason': 'Independent review',
                  'items': [{'id': ident, 'status': 'passed' if decision == 'pass' else 'failed',
-                            'reason': 'Checked approved requirement and evidence', 'evidence': evidence} for ident in ('S1', 'S2')]}
+                            'reason': 'Checked approved requirement and evidence', 'evidence': evidence} for ident in ids]}
         response = {**request, 'type': 'tool_result', 'details': {'results': [
             {'id': 'agent-' + call, 'agent': VERIFIER, 'exitCode': 0,
              'structuredOutput': {'status': 'valid', 'data': value}}]}}
@@ -541,3 +612,177 @@ class LightWorkflowTests(unittest.TestCase):
             self.gate.confirm(state['final_candidate'], 'tester', 'unreviewed-bundle')
         self.assertEqual(self.gate.status()['stage'], 'delivery_ready')
         self.assertEqual(self.accept(state['final_candidate'], 'tester')['stage'], 'done')
+
+
+class LightV20BuildFlowTests(LightWorkflowTests):
+    """zsspec v2.0: non-test cards map to build tasks with no baseline review."""
+
+    def check_task(self):
+        return [sys.executable, '-B', '-c',
+                'from src.sample import one, two; assert one() == 1 and two() == 2, "wrong values"']
+
+    def single_spec(self):
+        content = SPEC.split('### S2')[0] + '## 设计' + SPEC.split('## 设计', 1)[1]
+        return content, {'S1': ['AC-1', 'AC-2']}
+
+    def build_only_tasks(self):
+        return [{'id': '1.1', 'title': '实现正确返回值', 'kind': 'build', 'group': 'S1',
+                 'specs': ['S1'], 'files': ['src/sample.py'], 'argv': self.check_task()}]
+
+    def test_v20_build_only_flow_reaches_delivery_without_baseline_review(self):
+        self.entry()
+        content, single = self.single_spec()
+        self.assertEqual(self.gate.spec(content, single)['stage'], 'plan')
+        self.assertEqual(self.gate.plan(self.build_only_tasks())['stage'], 'applying')
+        s = self.gate.run()
+        self.assertEqual(s['stage'], 'applying')
+        self.assertEqual(s['tasks'][0]['result']['status'], 'failed')
+        (self.root / 'src/sample.py').write_text('def one(): return 1\ndef two(): return 2\n', encoding='utf-8')
+        s = self.gate.run()
+        self.assertEqual(s['stage'], 'verify')
+        self.assertEqual(s['tasks'][0]['completed'], True)
+        self.assertEqual(s['baselines'], {})
+        self.witness(ids=('S1',))
+        done = self.accept(s['final_candidate'], 'tester')
+        self.assertEqual(done['stage'], 'done')
+        self.assertEqual(self.gate.archive()['stage'], 'archived')
+
+    def test_v20_build_cannot_modify_frozen_test_of_prior_group(self):
+        tasks = [{'id': '1.1', 'title': 'RED S1', 'kind': 'red', 'group': 'S1', 'specs': ['S1'],
+                  'files': ['tests/test_1.py'], 'argv': self.argv},
+                 {'id': '1.2', 'title': 'GREEN S1', 'kind': 'green', 'group': 'S1', 'specs': ['S1'],
+                  'files': ['src/sample.py'], 'argv': self.argv, 'regression': self.argv},
+                 {'id': '2.1', 'title': 'BUILD S2', 'kind': 'build', 'group': 'S2', 'specs': ['S2'],
+                  'files': ['tests/test_1.py'], 'argv': self.check_task()},
+                 {'id': '3.1', 'title': '全量回归', 'kind': 'regression', 'specs': ['S1', 'S2'],
+                  'argv': self.argv, 'files': []}]
+        self.entry()
+        self.gate.spec(SPEC, MAP)
+        with self.assertRaisesRegex(GateError, 'BUILD'):
+            self.gate.plan(tasks)
+
+    def test_v20_mixed_build_and_tdd_flow(self):
+        tasks = [{'id': '1.1', 'title': 'RED S1', 'kind': 'red', 'group': 'S1', 'specs': ['S1'],
+                  'files': ['tests/test_1.py'], 'argv': self.argv},
+                 {'id': '1.2', 'title': 'GREEN S1', 'kind': 'green', 'group': 'S1', 'specs': ['S1'],
+                  'files': ['src/sample.py'], 'argv': self.argv, 'regression': self.argv},
+                 {'id': '2.1', 'title': 'BUILD S2 文档核验', 'kind': 'build', 'group': 'S2', 'specs': ['S2'],
+                  'files': ['src/sample.py'],
+                  'argv': [sys.executable, '-B', '-c', 'import src.sample; assert src.sample.__doc__, "missing docstring"']},
+                 {'id': '3.1', 'title': '全量回归', 'kind': 'regression', 'specs': ['S1', 'S2'],
+                  'argv': self.argv, 'files': []}]
+        self.entry()
+        self.gate.spec(SPEC, MAP)
+        self.assertEqual(self.gate.plan(tasks)['stage'], 'applying')
+        self.write_test(1)
+        self.run_current()
+        (self.root / 'src/sample.py').write_text('def one(): return 1\ndef two(): return 0\n', encoding='utf-8')
+        self.run_current()
+        s = self.gate.run()
+        self.assertEqual(s['stage'], 'applying')
+        (self.root / 'src/sample.py').write_text('"""Return integers."""\ndef one(): return 1\ndef two(): return 2\n', encoding='utf-8')
+        s = self.gate.run()
+        self.assertEqual(s['cursor'], 3)
+        s = self.gate.run()
+        self.assertEqual(s['stage'], 'verify')
+        self.witness()
+        self.assertEqual(self.accept(s['final_candidate'], 'tester')['stage'], 'done')
+
+    def test_v20_regression_required_only_when_test_cards_exist(self):
+        self.entry()
+        self.gate.spec(SPEC, MAP)
+        tdd = [{'id': '1.1', 'title': 'RED S1', 'kind': 'red', 'group': 'G1', 'specs': ['S1'],
+                'files': ['tests/test_1.py'], 'argv': self.argv},
+               {'id': '1.2', 'title': 'GREEN S1', 'kind': 'green', 'group': 'G1', 'specs': ['S1'],
+                'files': ['src/sample.py'], 'argv': self.argv, 'regression': self.argv},
+               {'id': '2.1', 'title': 'RED S2', 'kind': 'red', 'group': 'G2', 'specs': ['S2'],
+                'files': ['tests/test_2.py'], 'argv': self.argv},
+               {'id': '2.2', 'title': 'GREEN S2', 'kind': 'green', 'group': 'G2', 'specs': ['S2'],
+                'files': ['src/sample.py'], 'argv': self.argv, 'regression': self.argv}]
+        with self.assertRaisesRegex(GateError, '全量回归'):
+            self.gate.plan(tdd)
+        partial = [{'id': '1.1', 'title': '实现 S1', 'kind': 'build', 'group': 'S1', 'specs': ['S1'],
+                    'files': ['src/sample.py'], 'argv': self.check_task()}]
+        with self.assertRaisesRegex(GateError, '覆盖'):
+            self.gate.plan(partial)
+        content, single = self.single_spec()
+        self.gate.spec(content, single)
+        self.assertEqual(self.gate.plan(self.build_only_tasks())['stage'], 'applying')
+
+
+class LightLegacySpecCompatTests(LightWorkflowTests):
+    def test_legacy_spec_structure_still_accepted(self):
+        self.entry()
+        self.assertEqual(self.gate.spec(LEGACY_SPEC, MAP)['stage'], 'plan')
+        self.assertEqual(self.gate.plan(self.tasks)['stage'], 'applying')
+
+    def test_legacy_spec_with_conflict_rejected(self):
+        self.entry()
+        conflict = LEGACY_SPEC.replace('## 冲突声明\n无', '## 冲突声明\n代码现状与需求矛盾')
+        with self.assertRaisesRegex(GateError, '冲突声明'):
+            self.gate.spec(conflict, MAP)
+
+    def test_v20_spec_with_conflict_rejected(self):
+        self.entry()
+        conflict = SPEC.replace('### 冲突声明\n\n无', '### 冲突声明\n\n代码现状与需求矛盾')
+        with self.assertRaisesRegex(GateError, '冲突声明'):
+            self.gate.spec(conflict, MAP)
+
+
+class LightPlanDiagnosticsTests(LightWorkflowTests):
+    def test_green_missing_regression_error_names_task_and_field(self):
+        self.entry()
+        self.gate.spec(SPEC, MAP)
+        tasks = copy.deepcopy(self.tasks)
+        tasks[1].pop('regression')
+        with self.assertRaisesRegex(GateError, '任务 1\\.2.*regression.*RED 的 argv'):
+            self.gate.plan(tasks)
+
+    def test_empty_task_argv_error_names_task(self):
+        self.entry()
+        self.gate.spec(SPEC, MAP)
+        tasks = copy.deepcopy(self.tasks)
+        tasks[0]['argv'] = []
+        with self.assertRaisesRegex(GateError, '任务 1\\.1 的验证命令'):
+            self.gate.plan(tasks)
+
+
+class LightV20SkillDistributionTests(unittest.TestCase):
+    def test_installer_distributes_v20_templates_and_install_conventions(self):
+        f = LightWorkflowTests(); f.setUp()
+        try:
+            root = f.root
+            for rel in ('.zscode/skills/README.md',
+                        '.zscode/skills/zsspec-spec/SKILL.md', '.zscode/skills/zsspec-spec/templates/spec.md',
+                        '.zscode/skills/zsspec-plan/SKILL.md', '.zscode/skills/zsspec-plan/templates/plan.md',
+                        '.zscode/skills/zsspec-apply/SKILL.md', '.zscode/skills/zsspec-archive/SKILL.md',
+                        '.zscode/skills/zsspec-init/SKILL.md', '.zscode/skills/zsspec-init/templates/module.md',
+                        '.zscode/skills/zsspec-init/templates/MAP.md', '.zscode/skills/zsspec-init/templates/INDEX.md'):
+                self.assertTrue((root / rel).is_file(), rel)
+            body = (root / '.zscode/skills/zsspec-spec/SKILL.md').read_text(encoding='utf8')
+            self.assertIn('AIDevFlow 安装约定', body)
+        finally:
+            f.tearDown()
+
+    def test_discovery_next_action_directs_knowledge_init_until_initialized(self):
+        f = LightWorkflowTests(); f.setUp()
+        try:
+            (f.root / '.aidevflow' / 'light-knowledge.json').unlink()  # 模拟全新项目
+            gate = LightGate(f.root)
+            gate.create('init-guidance', 'fresh project request')
+            s = model_operation(gate, {'action': 'status'})
+            self.assertEqual(s['skill'], 'zsspec-init')
+            self.assertEqual(s['skill_path'], '.zscode/skills/zsspec-init/SKILL.md')
+            self.assertIn('zsspec-init', s['next_action'])
+            self.assertIn('knowledge', s['next_action'])
+            self.assertIn('requirements_context', s['next_action'])
+            self.assertFalse(s['knowledge']['initialized'])
+            gate.knowledge({'specs/MAP.md': '| 模块 | 职责 | 详情 |\n|---|---|---|\n',
+                            'specs/modules/extra.md': '# extra\n补充模块\n'})
+            s = model_operation(gate, {'action': 'status'})
+            self.assertIsNone(s.get('skill'))
+            self.assertNotIn('zsspec-init', s['next_action'])
+            self.assertIn('requirements_context', s['next_action'])
+            self.assertTrue(s['knowledge']['initialized'])
+        finally:
+            f.tearDown()
