@@ -33,7 +33,7 @@ def role_context(root: Path, role: str) -> dict[str, Any]:
     names = {value: key for key, value in ROLE_ALIASES.items()}
     if role not in names:
         raise GateError("Unknown AIDevFlow role")
-    if state.get("status") in ("needs_human", "archived", "delivery_ready", "delivery_ready_with_exceptions", "awaiting_user_input"):
+    if state.get("status") in ("automation_stalled", "needs_human", "archived", "delivery_ready", "delivery_ready_with_exceptions", "awaiting_user_input"):
         raise GateError("Resolve the Gate checkpoint before dispatching another role")
     if role == "intent_analyst":
         if state["current_stage"] != "intent" or contract is not None:
@@ -41,18 +41,45 @@ def role_context(root: Path, role: str) -> dict[str, Any]:
         task = (f"Read {state['request_snapshot_path']} and .aidevflow/schemas/intent-draft.schema.json. "
                 "Return the complete IntentDraft JSON via native yield. Record only decision-driving ambiguities as blocking questions. "
                 "Preserve array types. Do not write any files, author a Contract or implement code.")
+    elif role == "artifact_reviewer":
+        from .services.design import preparation, subjects
+        from .gate import read_json, sha256_file
+        target = state.get("artifact_review_target")
+        if not target or (contract and not state.get("engineering_revision")):
+            raise GateError("Prepare the current spec/plan review before dispatch")
+        request = read_json(root / target["path"])
+        if sha256_file(root / target["path"]) != target["sha256"] or subjects(gate, state, request["kind"]) != request["subjects"]:
+            raise GateError("Review inputs are stale")
+        task = (f"Read {target['path']} (SHA-256 {target['sha256']}) and .aidevflow/schemas/artifact-review.schema.json. "
+                "Independently inspect the exact subjects against the original request, approved Intent/PRD and scenarios. "
+                "Do not reopen resolved business questions, prune approved scope, invent human approval or modify files. "
+                "For engineering corrections also inspect the execution Contract draft in subjects: bounded technical file/check refinements must follow the same approved behavior, not expand scope or weaken checks. "
+                "Report artifact defects as changes_required with concrete repair instructions. Only a genuine new business "
+                "decision uses requires_decision. For pass, findings must be empty and coverage must map every unchanged "
+                "approved acceptance ID to S IDs, covering all specifications. Return one artifact-review-v1 object "
+                f"with task_id {state['task_id']}, kind {request['kind']} and input_sha256 {target['sha256']}.")
     elif role == "contract_planner":
         if state.get("status") != "intent_approved" or contract is not None:
             raise GateError("Planner requires finalized Intent and no registered Contract")
+        from .services.design import require_review
+        if state.get("method_preparation"):
+            require_review(gate, state, "spec")
+            require_review(gate, state, "plan")
         task = (f"Read {state['request_snapshot_path']}, {state['intent_path']}, .aidevflow/contract.example.json "
                 "and .aidevflow/schemas/contract.schema.json. Inspect relevant business project context only. "
                 f"Use the assigned task_id {state['task_id']}. Available method assets live in {skills_root(root).relative_to(root).as_posix()}. "
-                "For the current zsspec-plan package use zsspec-managed-v2: Design req/plan/test, Build apply, Review test/done. Declare method.modules and method.acceptance_map from every canonical approved acceptance ID to native AC IDs; preserve canonical IDs exactly. If only the old des/task/chk/verify package is installed use the legacy example/profile without upgrading any existing run. Use one cohesive work item for a small feature, "
-                "work_plan_required=true, concrete test argv and required_checks covering all acceptance IDs. "
-                "Do not use an unavailable test runner. Return one complete Contract JSON via native yield; do not implement or write state. "
-                "specs/zsspec.yml and method assets are project setup inputs, never generated design artifacts. "
-                "If zsspec.yml is absent use its documented defaults; its absence is pinned at Contract registration. "
-                "Use public schemas and examples; do not read framework implementation code or private observation logs.")
+                "Use method.profile=zsspec-docs-v2, method.slug from method-preparation.json and stages "
+                "design=[zsspec-spec,zsspec-plan], build=[zsspec-apply], review=[]. "
+                "Read the pinned method-preparation and both passing artifact reviews from status. Consume the real "
+                "spec.md and plan.md. Copy the approved acceptance_map from the spec review exactly. "
+                "Set design_artifacts to those two exact files and work_plan_required=true. Declare real argv checks "
+                "covering all approved acceptance IDs, including static review. test_files may be empty when real "
+                "build/runtime/metric checks suffice. For testing tasks declare method.task_tests mapping card IDs "
+                "to their concrete test files; test code is generated/reviewed/frozen during that active Build task. "
+                "Inspect existing package scripts and previous passing execution argv before choosing commands; do not invent a runner or repeat an already diagnosed invalid command. "
+                "Include concrete runtime scenarios for UI/stateful criteria, suitable replay scripts and evidence paths. "
+                "Preserve requirements_ref. Return exactly one Contract JSON; do not implement or write state.")
+
     else:
         bundle = state.get("verifier_bundle")
         if state["current_stage"] != "verify" or not bundle:
@@ -61,15 +88,26 @@ def role_context(root: Path, role: str) -> dict[str, Any]:
                 f"Read {bundle['path']}/BUNDLE.json first, then its physical object paths and verdict-schema.json. "
                 "Do not inspect writer conversation, project files outside the bundle, memory, tools or previous reports. "
                 "Do not run commands, repair, write files or delegate. Return one complete verdict JSON through native yield. "
-                "Each items[].evidence string must exactly equal one BUNDLE.json files[].path value, "
-                "for example objects/<sha256> or diff.patch, relative to the bundle. "
+                "Read candidate-binding.json: raw object hashes and normalized candidate hashes have different meanings; the machine-checked bindings establish their identity. "
+                "Use short BUNDLE.json files[].id values (E0001 etc.) in items[].evidence; do not transcribe SHA-256 paths. "
+                "Exact files[].path values remain valid for older bundles. "
                 "Do not prepend the bundle directory, append line numbers, descriptions or parentheses. "
                 "Put explanations in reason; report absent evidence honestly. "
                 "Inspect baseline revisions and evidence quarantine history. Skipped tests are not passes. "
                 "For approved executed exceptions, report affected acceptance items as waived, cite their exact waiver object and state residual risks.")
-    task += (' Native completion syntax is yield({"data": <the complete output object>}). '
-             'Do not put output fields directly at the top level of yield arguments; never submit {}. '
-             'The runtime removes the data envelope before Gate registration.')
+        from .services.verification import correction_prompt
+        task += correction_prompt(gate, state)
+    from .runtimes import selected
+    from .runtimes.registry import get_runtime
+    if role == "artifact_reviewer" and request["kind"] == "blind":
+        task = (f"Read only {target['path']} (SHA-256 {target['sha256']}) and its approved original request/Intent/PRD "
+                "plus relevant specs/modules knowledge. Do not read spec.md, plan.md, candidate drafts or writer conversation. "
+                "Independently derive 3-5 observable outcomes that must be verified for the approved request. "
+                f"Return artifact-review-v1, task_id {state['task_id']}, kind blind, input_sha256 {target['sha256']}, "
+                "outcome pass, coverage {}, and findings containing those 3-5 concrete input-to-expected observations.")
+    task += " " + get_runtime(selected(root, state)).completion_hint()
+    if state.get("method_preparation") and role == "contract_planner":
+        task += f" Read preparation {state['method_preparation']['path']} and these passing reviews: {state.get('artifact_reviews', {})}."
     if state.get("requirements_ref") and role == "contract_planner":
         task += (f" Read the approved requirements manifest {state['requirements_ref']['path']} and its PRD/scenarios. "
                  f"Copy requirements_ref exactly into Contract: {state['requirements_ref']}. "

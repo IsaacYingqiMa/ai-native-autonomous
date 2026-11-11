@@ -28,7 +28,7 @@ def inventory(source: Path, names: set[str]) -> dict:
 
 def discover(root: Path) -> dict:
     from .runtimes import skills_root
-    from .method_adapters.zsspec import ZsspecAdapter
+    from .method_adapters.zsspec_docs import ZsspecDocsAdapter as ZsspecAdapter
     from .gate import read_json, write_json_atomic
     from .locking import writer_lock
     adapter = ZsspecAdapter()
@@ -47,7 +47,7 @@ def discover(root: Path) -> dict:
             write_json_atomic(cache, value)
     return {**value, "cache_hit": hit, "skills_root": source.relative_to(root).as_posix(),
             "discovered_skills": sorted(p.parent.name for p in source.glob("zsspec-*/SKILL.md")),
-            "excluded_from_execution": ["zsspec-init", "zsspec-feedback", "zsspec-doctor"]}
+            "excluded_from_execution": ["zsspec-feedback", "zsspec-doctor"]}
 
 
 def source_for(root: Path, contract: dict | None = None) -> Path:
@@ -64,12 +64,33 @@ def source_for(root: Path, contract: dict | None = None) -> Path:
         pinned = run / "method-source"
         if (run / "method-source-ready.json").is_file():
             return pinned
+    active = root / ".aidevflow/active-run.json"
+    if active.is_file():
+        state = read_json(root / read_json(active)["state_path"])
+        if state.get("method_preparation"):
+            return root / ".aidevflow/runs" / safe_id(state["task_id"]) / "method-source"
     return skills_root(root)
 
 
 def pin(root: Path, run: Path, contract: dict) -> dict:
     from .gate import GateError, write_bytes_new, write_json_new, read_json, sha256_file
     adapter = adapter_for(contract)
+    from .method_adapters.zsspec_docs import enabled as docs
+    if docs(contract) and (run / "method-source-ready.json").is_file():
+        source = run / "method-source"
+        package = read_json(run / "method-source-ready.json")
+        if inventory(source, {n for v in adapter.stages.values() for n in v} | set(adapter.support)) != package:
+            raise GateError("Prepared method snapshot changed")
+        resolved = {**adapter.describe(source), "package": package}
+        path = run / "resolved-method.json"
+        if path.exists():
+            if read_json(path) != resolved:
+                raise GateError("Interrupted method binding conflicts with prepared source")
+        else:
+            write_json_new(path, resolved)
+        return {"package": package, "resolved": {"path": (run / "resolved-method.json").relative_to(root).as_posix(),
+                "sha256": sha256_file(run / "resolved-method.json")}, "adapter_api_version": 1,
+                "source_path": source.relative_to(root).as_posix()}
     resolved = discover(root)
     destination = run / "method-source"
     from .runtimes import skills_root

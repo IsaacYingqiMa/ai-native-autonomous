@@ -1,3 +1,5 @@
+> 历史协议/验证记录：当前五技能包的 OMP 流程见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [README.md](README.md)。旧记录不代表当前版本已通过。
+
 # AIDevFlow 方法解耦与当前 zsspec 适配：源码改造计划
 
 日期：2026-11-03。状态：源码改造及本轮回归已完成；实现说明见 ZSSPEC-MANAGED.md。最新优先级与实施边界见第 14 节；该节收紧此前自动解析的生效范围。

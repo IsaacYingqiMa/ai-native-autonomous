@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .adapters import projected_documents, semantic_content, validate_projections
+from .runtimes.registry import get_runtime
 from .runtimes import binding as runtime_binding, selected as selected_runtime
 from .locking import writes
 
@@ -172,6 +173,10 @@ class Gate:
         active = read_json(self.active_path)
         task_id = safe_id(active.get("task_id", ""))
         run_dir = self.runs / task_id
+        if (run_dir / "engineering-transaction.json").exists():
+            raise GateError("Engineering transaction pending; recover-engineering-revision before continuing")
+        if not allow_method_transaction and (run_dir / "archive-transaction.json").exists():
+            raise GateError("Delivery archive transaction pending; recover-delivery-archive before continuing")
         if not allow_method_transaction and (run_dir / "method-transaction.json").exists():
             raise GateError("Method operation pending; use method-recover --mode finish or rollback before continuing")
         if (run_dir / "baseline-transaction.json").is_file():
@@ -371,6 +376,10 @@ class Gate:
         contract = read_json(draft_abs)
         errors = validate_contract(contract)
         errors.extend(self._validate_available_method_skills(contract))
+        from .method_adapters.zsspec_docs import enabled as docs
+        if docs(contract) and not errors:
+            from .services.design import check_binding
+            check_binding(self, state, contract)
         if errors:
             raise GateError("Invalid contract: " + "; ".join(errors))
         if state.get("requirements_ref"):
@@ -433,8 +442,8 @@ class Gate:
 
     def _save(self, state: dict[str, Any], run_dir: Path, event: str, **fields: Any) -> None:
         if state.get("contract_path"):
-            from .method_registry import adapter_for
-            if adapter_for(read_json(self._safe_repo_path(state["contract_path"]))) and event in {
+            from .method_registry import scripted
+            if scripted(read_json(self._safe_repo_path(state["contract_path"]))) and event in {
                     "work_plan_registered", "work_item_started", "work_item_completed", "work_item_reopened",
                     "test_executed", "check_recorded", "failure_routed", "run_resumed",
                     "evidence_repair_applied", "evidence_integrity_blocked", "integrity_mismatch"}:
@@ -761,6 +770,9 @@ class Gate:
             self._check_build_ready(state, contract)
         elif state["current_stage"] == "verify":
             self._check_verifier_passed(state, run_dir, contract)
+            from .method_adapters.zsspec_docs import enabled as docs
+            if docs(contract) and not state.get("delivery_archive", {}).get("committed"):
+                raise GateError("Commit the independently reviewed delivery archive before delivery_ready")
         state["current_stage"] = to_stage
         state["status"] = ("delivery_ready_with_exceptions" if state.get("accepted_with_exceptions") else "delivery_ready") if to_stage == "delivery_ready" else "active"
         self._save(state, run_dir, "stage_advanced", to_stage=to_stage)
@@ -769,8 +781,13 @@ class Gate:
     @writes
     def freeze_tests(self, paths: list[str]) -> dict[str, str]:
         state, run_dir, contract = self._load_active()
+        from .method_adapters.zsspec_docs import enabled as docs
+        task_mode = docs(contract) and state["current_stage"] == "build"
         required = contract.get("test_files", []) + contract.get("test_support_files", [])
         requested = paths or required
+        if task_mode:
+            from .services.execution import freeze_task_tests
+            return freeze_task_tests(self, state, run_dir, contract, requested)
         if required and set(requested) != set(required):
             raise GateError("Freeze exactly the test_files and test_support_files declared in the contract")
         if not requested:
@@ -781,8 +798,10 @@ class Gate:
                 return state["frozen_tests"]
             raise GateError("Use plan-baseline-revision to change the frozen file set")
         self._require_stage(state, "design")
-        from .method_execution import require_ready
-        require_ready(self, state, run_dir, contract)
+        from .method_registry import scripted
+        if scripted(contract):
+            from .method_execution import require_ready
+            require_ready(self, state, run_dir, contract)
         from .checks import require_design_review
         require_design_review(self, state, run_dir, contract)
         from .baselines import require_support, snapshot
@@ -817,6 +836,21 @@ class Gate:
         errors = validate_work_plan(draft, state["task_id"], contract)
         if errors:
             raise GateError("Invalid work plan: " + "; ".join(errors))
+        from .method_adapters.zsspec_docs import enabled as docs, parse_plan
+        if docs(contract):
+            from .services.design import require_review, preparation
+            require_review(self, state, "spec")
+            require_review(self, state, "plan")
+            current = preparation(self, state)
+            cards = parse_plan(self._safe_repo_path(current["plan"]).read_text(encoding="utf-8-sig"))
+            if [i["id"] for i in draft["items"]] != [c["id"] for c in cards]:
+                raise GateError("Work items must exactly match reviewed task cards in execution order; use compile-work-plan")
+            for index, (item, card) in enumerate(zip(draft["items"], cards)):
+                expected_dependencies = [cards[index - 1]["id"]] if index else []
+                sid = card["id"].split("-")[0]
+                expected_acceptance = {a for a, ids in contract["method"]["acceptance_map"].items() if sid in ids} if sid.startswith("S") else set(contract["method"]["acceptance_map"])
+                if item["title"] != card["title"] or item["done_criteria"] != [card["expected"]] or item.get("depends_on", []) != expected_dependencies or set(item["acceptance_items"]) != expected_acceptance:
+                    raise GateError("Work item semantics/dependencies must come from the reviewed task card")
         errors = validate_projections(draft, contract, self.root)
         from .managed import enabled
         if (state.get("reliability_version", 1) >= 2 or enabled(contract)) and contract.get("method", {}).get("name") == "zsspec":
@@ -861,7 +895,8 @@ class Gate:
         if item["status"] == "in_progress":
             return item
         from .managed import enabled
-        if enabled(contract) and any(entry["id"] != work_item_id and entry["status"] == "in_progress" for entry in state["work_items"]):
+        from .method_adapters.zsspec_docs import enabled as docs
+        if enabled(contract) and not docs(contract) and any(entry["id"] != work_item_id and entry["status"] == "in_progress" for entry in state["work_items"]):
             raise GateError("Managed v1 is serial; finish the active work item before starting another")
         incomplete = [dependency for dependency in item["depends_on"] if self._work_item(state, dependency)["status"] != "completed"]
         if incomplete:
@@ -872,7 +907,7 @@ class Gate:
         return item
 
     @writes
-    def complete_work_item(self, work_item_id: str, evidence_paths: list[str]) -> dict[str, Any]:
+    def complete_work_item(self, work_item_id: str, evidence_paths: list[str], observation: str = "") -> dict[str, Any]:
         state, run_dir, _ = self._load_active()
         self._require_stage(state, "build")
         self._check_work_plan_integrity(state, run_dir)
@@ -922,6 +957,10 @@ class Gate:
                 "source_path": source["source_path"],
                 "source_sha256": source["source_sha256"],
             })
+        from .method_adapters.zsspec_docs import enabled as docs
+        if docs(read_json(self._safe_repo_path(state["contract_path"]))):
+            from .services.execution import check_completion
+            check_completion(self, state, read_json(self._safe_repo_path(state["contract_path"])), item, observation)
         item["status"] = "completed"
         item["evidence"] = evidence
         item["updated_at"] = utc_now()
@@ -948,7 +987,10 @@ class Gate:
                     changed = True
         for candidate in state.get("work_items", []):
             if candidate["id"] in reopened:
-                candidate["status"] = "in_progress"
+                from .method_adapters.zsspec_docs import enabled as docs
+                current_contract = read_json(self._safe_repo_path(state["contract_path"]))
+                candidate["status"] = "not_started" if docs(current_contract) and candidate["id"] != work_item_id else "in_progress"
+                candidate.pop("observation", None)
                 candidate["evidence"] = []
                 candidate["updated_at"] = utc_now()
         self._save(state, run_dir, "work_item_reopened", work_item_id=work_item_id, reopened_work_items=sorted(reopened), reason=reason.strip())
@@ -999,18 +1041,19 @@ class Gate:
                 raise GateError("Immutable baseline snapshots changed; restore the original objects from backup before continuing")
             for rel in contract.get("design_artifacts", []):
                 entry = baseline["files"].get(rel)
-                live = self._safe_repo_path(rel)
+                live = self._artifact_path(state, rel)
                 if not entry or not live.is_file() or semantic_content(rel, live.read_bytes(), self._plan(state)) != semantic_content(rel, self._safe_repo_path(entry["path"]).read_bytes(), self._plan(state)):
                     mismatches.append(rel)
         if contract and state.get("baseline_ref"):
             from .baselines import require_support
             require_support(self, contract)
         manifest_path = self.control / "runtime-manifest.json"
-        if selected_runtime(self.root, state) == "omp" and manifest_path.is_file():
+        if get_runtime(selected_runtime(self.root, state)).resource_redirection and manifest_path.is_file():
             # Shared project defaults may change for future runs. Executable
             # adapters, roles and schemas must still match the installation.
-            prefixes = (".aidevflow/runtime/", ".aidevflow/schemas/", ".omp/extensions/aidevflow/",
+            prefixes = (".aidevflow/engine/", ".aidevflow/runtime/", ".aidevflow/schemas/", ".omp/extensions/aidevflow/",
                         ".omp/agents/aidevflow-", ".omp/skills/aidevflow-flow/",
+                        ".zscode/extensions/aidevflow/", ".zscode/agents/aidevflow-", ".zscode/skills/aidevflow-flow/",
                         "scripts/aidevflow.py", "scripts/aidevflow_bridge.py", "scripts/aidevflow_browser.py")
             manifest = read_json(manifest_path)
             if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
@@ -1032,7 +1075,7 @@ class Gate:
                 mismatches.append(f"{skills_root(self.root).relative_to(self.root).as_posix()} (pinned method package)")
             from .method_registry import adapter_for
             adapter = adapter_for(contract)
-            if adapter and selected_runtime(self.root, state) != "omp":
+            if adapter and not get_runtime(selected_runtime(self.root, state)).resource_redirection:
                 # OMP rewrites every method read to the task snapshot. Claude's
                 # native Skill loader still resolves the installed copy, so keep
                 # its conservative host-source drift check until it has that adapter.
@@ -1080,7 +1123,18 @@ class Gate:
             raise GateError(f"test suite {suite} requires --target")
         if suite in ("red", "green") and target not in contract.get("test_files", []):
             raise GateError(f"{suite} target must match one of contract.test_files")
-        if suite == "red" and state["current_stage"] != "design":
+        from .method_adapters.zsspec_docs import enabled as docs
+        if docs(contract) and suite == "green" and target not in state.get("frozen_tests", {}):
+            raise GateError("Green requires the actual reviewed frozen task test")
+        task_red = docs(contract) and (state["current_stage"] == "build" or against_base and state["current_stage"] == "verify")
+        if suite == "red" and task_red:
+            if against_base:
+                if target not in state.get("frozen_tests", {}):
+                    raise GateError("Red replay requires the current reviewed frozen assertions")
+            else:
+                from .services.execution import require_task_red
+                require_task_red(self, state, contract, target)
+        if suite == "red" and state["current_stage"] != "design" and not task_red:
             raise GateError("Red evidence must be collected during Design, before implementation")
         if suite == "red":
             from .managed import enabled
@@ -1130,10 +1184,16 @@ class Gate:
         }
         from .recovery import baseline_id, replaced
         record["baseline_id"] = baseline_id(state)
+        if docs(contract) and suite == "red":
+            from .services.execution import red_subject
+            record["red_subject"] = red_subject(state, contract, target)
         if against_base:
             record["replay_base_commit"] = state["base_commit"]
         record["passed"] = result.returncode == 0 and not record["candidate_changed"]
         record["valid_red"] = suite != "red" or (not record["candidate_changed"] and valid_red_result(result.returncode, result.stdout + result.stderr))
+        from .test_execution import parse_test_counts
+        if (counts := parse_test_counts(result.stdout + result.stderr)) is not None:
+            record["test_counts"] = counts
         if suite != "red":
             coverage = apply_waivers(self, state, contract, suite, target, summary(test_report, result.stdout + result.stderr))
             if coverage is not None:
@@ -1161,7 +1221,7 @@ class Gate:
         replaced(state, record)
         write_json_new(evidence, record)
         record["evidence_sha256"] = sha256_file(evidence)
-        state["test_runs"].append({key: record[key] for key in ("id", "suite", "target", "exit_code", "passed", "valid_red", "evidence_path", "evidence_sha256", "finished_at", "candidate_sha256", "evidence_epoch", "candidate_changed", "artifacts", "artifact_error", "baseline_id", "coverage", "replay_base_commit", "accepted_with_exceptions", "replaces_incidents") if key in record})
+        state["test_runs"].append({key: record[key] for key in ("id", "suite", "target", "exit_code", "passed", "valid_red", "evidence_path", "evidence_sha256", "finished_at", "candidate_sha256", "evidence_epoch", "candidate_changed", "artifacts", "artifact_error", "baseline_id", "red_subject", "test_counts", "coverage", "replay_base_commit", "accepted_with_exceptions", "replaces_incidents") if key in record})
         state["verifier_bundle"] = None
         state.pop("verdict_ref", None)
         state.pop("accepted_with_exceptions", None)
@@ -1178,6 +1238,11 @@ class Gate:
         from .recovery import require_healthy
         require_healthy(self, state, run_dir)
         self._check_build_ready(state, contract)
+        from .method_adapters.zsspec_docs import enabled as docs
+        if docs(contract):
+            from .services.delivery import manifest
+            if manifest(self, state)["candidate"] != self._candidate(state, contract)["sha256"]:
+                raise GateError("Staged archive is stale; reset and regenerate it for the current candidate")
         if state.get("verifier_bundle"):
             self._check_candidate_bundle(state, contract)
             self._check_bundle_integrity(run_dir, state["verifier_bundle"])
@@ -1203,6 +1268,17 @@ class Gate:
         bundle_dir = writer.directory
         files: list[Path] = []
         files.append(self._safe_repo_path(state["contract_path"]))
+        if state.get("delivery_archive"):
+            from .services.delivery import manifest
+            archive = manifest(self, state)
+            files.append(self._safe_repo_path(state["delivery_archive"]["path"]))
+            for entry in archive["changes"].values():
+                files.extend(self._safe_repo_path(entry[k]) for k in ("before_object", "after_object") if k in entry)
+        for ref in state.get("task_test_reviews", {}).values():
+            if sha256_file(self._safe_repo_path(ref["path"])) != ref["sha256"]:
+                raise GateError("Task test review changed")
+            files.append(self._safe_repo_path(ref["path"]))
+            files.extend(self._safe_repo_path(e["path"]) for e in read_json(self._safe_repo_path(ref["path"]))["evidence"])
         if state.get("requirements_ref"):
             from .discovery import verify_reference
             ref = state["requirements_ref"]
@@ -1211,6 +1287,17 @@ class Gate:
             files.extend(self._safe_repo_path(ref[key]) for key in ("path", "approval_path"))
         from .checks import intact
         from .method_registry import adapter_for
+        for ref in state.get("artifact_review_history", []):
+            path = self._safe_repo_path(ref["path"])
+            if sha256_file(path) != ref["sha256"]:
+                raise GateError("Artifact review changed before bundling")
+            files.append(path)
+            files.append(self._safe_repo_path(ref["input"]["path"]))
+            for snapshot in ref.get("subject_snapshots", []):
+                subject = self._safe_repo_path(snapshot["path"])
+                if sha256_file(subject) != snapshot["sha256"]:
+                    raise GateError("Reviewed subject snapshot changed")
+                files.append(subject)
         if adapter_for(contract):
             policy = read_json(self._safe_repo_path(state["method_policy"]["path"]))
             files.append(self._safe_repo_path(policy["resolved"]["path"]))
@@ -1305,6 +1392,23 @@ class Gate:
         ledger = run_dir / "execution-ledger.json"
         write_json_atomic(ledger, {"test_runs": state["test_runs"], "repairs": state.get("evidence_repairs", [])})
         files.append(ledger)
+        if state.get("implementation_baseline"):
+            ref = state["implementation_baseline"]
+            p = self._safe_repo_path(ref["path"])
+            if sha256_file(p) != ref["sha256"]:
+                raise GateError("Implementation baseline changed before verification")
+            files.append(p)
+            for logical, obj in read_json(p)["files"].items():
+                if not any(_glob_match(logical, pattern) for pattern in contract.get("code_paths", [])) and logical not in contract.get("test_files", []) + contract.get("test_support_files", []):
+                    continue
+                source = self._safe_repo_path(obj["path"])
+                if sha256_file(source) != obj["sha256"]:
+                    raise GateError("Original implementation object changed")
+                files.append(source)
+        for rel in state.get("frozen_tests", {}).values():
+            p = run_dir / "task-test-baselines" / rel
+            if p.is_file():
+                files.append(p)
         for item in effective_records(self, state, run_dir):
             evidence = self._safe_repo_path(item["evidence_path"])
             if not evidence.is_file() or sha256_file(evidence) != item.get("evidence_sha256"):
@@ -1359,6 +1463,14 @@ class Gate:
         manifest.append({"path": "verdict-schema.json", "sha256": sha256_file(bundle_dir / "verdict-schema.json")})
         if work_items_path:
             manifest.append({"path": "work-items.json", "sha256": sha256_file(work_items_path)})
+        from .services.verification import index_bundle
+        index_bundle(self, state, contract, bundle_dir, manifest, candidate)
+        # The supplied schema enumerates the actual citations for this exact bundle.
+        verdict_schema = read_json(bundle_dir / "verdict-schema.json")
+        from .services.verification import citation_paths
+        verdict_schema["properties"]["items"]["items"]["properties"]["evidence"]["items"]["enum"] = sorted(citation_paths({"files": manifest}))
+        write_json_atomic(bundle_dir / "verdict-schema.json", verdict_schema)
+        next(e for e in manifest if e["path"] == "verdict-schema.json")["sha256"] = sha256_file(bundle_dir / "verdict-schema.json")
         spec_files = [{"path": rel, "sha256": sha256_file(self._safe_repo_path(rel))} for rel in contract.get("design_artifacts", []) if self._safe_repo_path(rel).is_file()]
         if state.get("intent_path"):
             spec_files.append({"path": state["intent_path"], "sha256": sha256_file(self.root / state["intent_path"])})
@@ -1370,6 +1482,7 @@ class Gate:
         bundle_dir = writer.publish()
         state["verifier_bundle"] = {"path": bundle_dir.relative_to(self.root).as_posix(), "sha256": bundle_digest, "spec_version": spec_version, "candidate_sha256": candidate["sha256"], "evidence_epoch": state.get("evidence_epoch", 0)}
         state.pop("verdict_ref", None)
+        state.pop("verifier_output_correction", None)
         state.pop("accepted_with_exceptions", None)
         state.pop("waived_acceptance_items", None)
         state.pop("blocker", None)
@@ -1390,10 +1503,16 @@ class Gate:
         verdict = read_json(self._safe_repo_path(verdict_path))
         errors = validate_verdict(verdict, state, run_dir, contract)
         if errors:
+            # Only a genuine completed native result can become correction input.
+            self._require_agent_receipt(state, run_dir, "verifier", verdict, state["verifier_bundle"]["sha256"])
+            if all(error.startswith("evidence is not in the frozen bundle manifest:") for error in errors):
+                from .services.verification import correction
+                correction(self, state, run_dir, verdict, verdict_path, errors)
             raise GateError("Invalid verifier verdict: " + "; ".join(errors))
         self._require_agent_receipt(state, run_dir, "verifier", verdict, state["verifier_bundle"]["sha256"])
         destination = run_dir / "verifier-report.json"
         write_json_atomic(destination, verdict)
+        state.pop("verifier_output_correction", None)
         state["verdict_ref"] = {"sha256": sha256_file(destination), "bundle_sha256": state["verifier_bundle"]["sha256"]}
         if all(item["verdict"] in ("pass", "waived") for item in verdict["items"]):
             state["status"] = "accepted"
@@ -1402,7 +1521,8 @@ class Gate:
         else:
             state.pop("accepted_with_exceptions", None)
             state.pop("waived_acceptance_items", None)
-            state["status"] = "needs_human" if any(item["verdict"] == "blocked" for item in verdict["items"]) else "retrying"
+            from .method_adapters.zsspec_docs import enabled as docs
+            state["status"] = "retrying" if docs(contract) else "needs_human" if any(item["verdict"] == "blocked" for item in verdict["items"]) else "retrying"
         self._save(state, run_dir, "verifier_verdict_recorded", passed=state["status"] == "accepted", verdict_path=destination.relative_to(self.root).as_posix())
         return {"status": state["status"], "path": destination.relative_to(self.root).as_posix()}
 
@@ -1416,14 +1536,25 @@ class Gate:
         if not isinstance(route, dict) or route.get("to") not in STAGES and route.get("to") != "needs_human":
             raise GateError(f"No valid routing rule for failure type {failure_type}")
         attempts = state.setdefault("repair_attempts", {})
-        attempts[failure_type] = attempts.get(failure_type, 0) + 1
+        from .services.autonomy import attempt
+        from .method_adapters.zsspec_docs import enabled as docs
+        report = run_dir / "verifier-report.json"
+        failed = [i["id"] for i in read_json(report)["items"] if i["verdict"] not in ("pass", "waived")] if report.is_file() else []
+        progressing = attempt(state, contract, failure_type, {"files": self._candidate(state, contract)["files"], "items": sorted(failed), "type": failure_type})
         target = route["to"]
-        if sum(attempts.values()) > contract.get("max_repair_attempts", 3) + state.get("repair_budget_extension", 0):
+        if not progressing and not docs(contract):
             target = "needs_human"
+        elif not progressing and target == "build":
+            self._save(state, run_dir, "automation_stalled", failure_type=failure_type)
+            return {"to": "automation_stalled", "status": state["status"], "attempt": attempts[failure_type]}
         if target in ("intent", "design"):
             # Changing a pinned specification/test baseline needs an explicit new
             # version. Preserve it and request plan-baseline-revision.
             target = "needs_human"
+        if state.get("delivery_archive") and not state["delivery_archive"].get("committed"):
+            from .services.delivery import reset
+            reset(self)
+            state.pop("delivery_archive", None)
         state["evidence_epoch"] = state.get("evidence_epoch", 0) + 1
         state["verifier_bundle"] = None
         state.pop("verdict_ref", None)
@@ -1431,9 +1562,13 @@ class Gate:
         state.pop("waived_acceptance_items", None)
         state["current_stage"] = target if target in STAGES else state["current_stage"]
         state["status"] = "needs_human" if target == "needs_human" else "active"
+        if docs(contract) and target == "build":
+            from .services.execution import reopen_affected
+            reopened = reopen_affected(state, contract, failed)
         state["blocker"] = {"kind": "product", "failure_type": failure_type, "reason": summary}
         self._save(state, run_dir, "failure_routed", failure_type=failure_type, to=target, attempt=attempts[failure_type], summary=summary)
-        return {"to": target, "attempt": attempts[failure_type], "status": state["status"]}
+        return {"to": target, "attempt": attempts[failure_type], "status": state["status"],
+                "reopened_work_items": reopened if docs(contract) and target == "build" else []}
 
     @writes
     def resume_run(self, by: str, utterance: str, additional_attempts: int = 1, mode: str = "repair") -> dict[str, Any]:
@@ -1454,6 +1589,10 @@ class Gate:
             self._save(state, run_dir, "infrastructure_resumed", by=by.strip(), utterance=utterance.strip(), mode=mode)
             return state
         state["repair_budget_extension"] = state.get("repair_budget_extension", 0) + additional_attempts
+        if state.get("delivery_archive") and not state["delivery_archive"].get("committed"):
+            from .services.delivery import reset
+            reset(self)
+            state.pop("delivery_archive", None)
         state["evidence_epoch"] = state.get("evidence_epoch", 0) + 1
         state["verifier_bundle"] = None
         state.pop("verdict_ref", None)
@@ -1495,17 +1634,22 @@ class Gate:
 
     @staticmethod
     def _require_executable(state: dict[str, Any]) -> None:
-        if state.get("status") in ("needs_human", "archived", "delivery_ready", "delivery_ready_with_exceptions"):
+        if state.get("status") == "automation_stalled":
+            raise GateError("Automatic repair stalled without progress; preserve evidence and report the technical blocker. Ordinary repair does not require user approval.")
+        if state.get("status") in ("automation_stalled", "needs_human", "archived", "delivery_ready", "delivery_ready_with_exceptions"):
             raise GateError(f"Run is {state['status']}; execution is stopped. A needs_human run requires an explicit resume-run instruction.")
 
     def _plan(self, state: dict[str, Any]) -> dict[str, Any] | None:
         return read_json(self._safe_repo_path(state["work_plan"]["path"])) if state.get("work_plan") else None
 
+    def _artifact_path(self, state, relative):
+        return self._safe_repo_path(state.get("artifact_relocations", {}).get(relative, relative))
+
     def _design_manifest(self, state: dict[str, Any], contract: dict[str, Any]) -> dict[str, str | None]:
-        plan = self._plan(state)
+        plan = self._plan(state) or {"method_profile": contract.get("method", {}).get("profile")}
         result: dict[str, str | None] = {}
         for rel in contract.get("design_artifacts", []):
-            path = self._safe_repo_path(rel)
+            path = self._artifact_path(state, rel)
             try:
                 result[rel] = sha256_bytes(semantic_content(rel, path.read_bytes(), plan)) if path.is_file() else None
             except (UnicodeError, ValueError) as exc:
@@ -1522,12 +1666,12 @@ class Gate:
         # New files are scoped so a newly saved, untracked verdict/draft is not a
         # product change. All coordinator drafts belong under the intake directory.
         names = set(tracked) | explicit | {rel for rel in others + ignored_product if rel in explicit or any(_glob_match(rel, pattern) for pattern in contract.get("code_paths", []))}
-        plan = self._plan(state)
+        plan = self._plan(state) or {"method_profile": contract.get("method", {}).get("profile")}
         files: dict[str, str | None] = {}
         from .managed import enabled, artifact_path, file_hash, package_manifest
         from .method_registry import adapter_for
         installed_method_prefixes = ()
-        if (adapter := adapter_for(contract)) and selected_runtime(self.root, state) == "omp":
+        if (adapter := adapter_for(contract)) and get_runtime(selected_runtime(self.root, state)).resource_redirection:
             from .runtimes import skills_root
             base = skills_root(self.root).relative_to(self.root).as_posix()
             used = {n for v in adapter.stages.values() for n in v} | set(adapter.support)
@@ -1548,6 +1692,8 @@ class Gate:
                 files[rel] = sha256_bytes(semantic_content(rel, path.read_bytes(), plan)) if path.is_file() else None
             except (UnicodeError, ValueError) as exc:
                 raise GateError(f"Cannot snapshot candidate file {rel}: {exc}") from exc
+        from .services.delivery import normalize_candidate
+        normalize_candidate(self, state, files)
         runtime = self.control / "runtime-manifest.json"
         value = {"files": files, "contract_sha256": state.get("contract_sha256"), "evidence_epoch": state.get("evidence_epoch", 0), "runtime_sha256": sha256_file(runtime) if runtime.is_file() else None}
         if state.get("baseline_ref"):
@@ -1598,10 +1744,17 @@ class Gate:
 
     def _sync_document_projections(self, state: dict[str, Any], run_dir: Path) -> None:
         plan = self._plan(state)
-        if not plan or not plan.get("projections"):
+        if not plan:
             return
         contract = read_json(self._safe_repo_path(state["contract_path"]))
         from .method_registry import adapter_for
+        from .method_adapters.zsspec_docs import enabled as docs
+        if docs(contract):
+            from .services.execution import sync_plan
+            sync_plan(self, state, run_dir, contract)
+            return
+        if not plan.get("projections"):
+            return
         if adapter_for(contract):
             # Native state writes are staged by method-sync, never performed in _save.
             return
@@ -1626,6 +1779,10 @@ class Gate:
     def sync_projections(self) -> dict[str, Any]:
         from .method_registry import adapter_for
         state, run_dir, contract = self._load_active()
+        from .method_adapters.zsspec_docs import enabled as docs
+        if docs(contract):
+            from .services.execution import sync_plan
+            return sync_plan(self, state, run_dir, contract)
         if adapter_for(contract):
             from .method_execution import execute
             return execute(self.root, "sync")
@@ -1646,9 +1803,9 @@ class Gate:
         return record_design_review(self, reviewer, reason, evidence)
 
     @writes
-    def record_check(self, check_id: str, result: str, candidate: str, reviewer: str, reason: str, evidence: list[str]) -> dict[str, Any]:
+    def record_check(self, check_id: str, result: str, candidate: str, reviewer: str, reason: str, evidence: list[str], observations: str | None = None) -> dict[str, Any]:
         from .checks import record_check
-        return record_check(self, check_id, result, candidate, reviewer, reason, evidence)
+        return record_check(self, check_id, result, candidate, reviewer, reason, evidence, observations)
 
     def diagnose_evidence(self) -> dict[str, Any]:
         from .recovery import diagnose
@@ -1719,7 +1876,14 @@ class Gate:
         raise GateError(f"Missing completed execution receipt for {agent_type}; run recover-runtime and inspect doctor --session-id <native-session-id> before redispatch. Inspect status.agent_invocations for pending completion, missing/invalid output, identity conflict, unsupported mode or stale inputs. Wait for active execution; confirm failed/unsupported execution has ended before a fresh ordinary role dispatch. Submit its unchanged JSON result.")
 
     def _next_actions(self, state: dict[str, Any], contract: dict[str, Any] | None) -> list[str]:
+        from .services.design import next_actions
+        actions = next_actions(self, state, contract)
+        if actions is not None:
+            return actions
         if state.get("status") == "needs_human":
+            from .services.autonomy import routine_checkpoint
+            if routine_checkpoint(state, contract):
+                return ["recover-routine; existing requirements authorize ordinary repair. Do not ask the user to approve technical corrections."]
             kind = state.get("blocker", {}).get("kind")
             if kind == "evidence_integrity":
                 return ["diagnose-evidence; plan-evidence-repair --reason ...; review the concrete plan; apply-evidence-repair only with actual authorization; rerun affected checks"]
@@ -1729,6 +1893,9 @@ class Gate:
                 return ["Explain the infrastructure blocker; after explicit user instruction use resume-run --mode retry --by ... --utterance ...; preserve stage and checks, then rerun stale checks if the runtime changed"]
             return ["Explain the blocker; await an explicit user instruction before resume-run or archive"]
         if state.get("current_stage") == "delivery_ready":
+            from .method_adapters.zsspec_docs import enabled as docs
+            if docs(contract):
+                return ["Present verified delivery and archive evidence. Commit, merge and release require separate authorization; archive closes the task pointer."]
             from .method_registry import adapter_for
             if adapter_for(contract):
                 return ["Present technical delivery and evidence; method closure awaits actual user business acceptance (method-accept). Release is separate."]
@@ -1740,6 +1907,9 @@ class Gate:
         if contract is None:
             return ["Dispatch Intent Analyst and resolve blocking choices" if state.get("status") != "intent_approved" else "Dispatch Contract Planner and register-contract"]
         if state["current_stage"] == "design":
+            from .method_adapters.zsspec_docs import enabled as docs
+            if docs(contract):
+                return ["compile-work-plan from the reviewed task cards; advance --to build. Tests are generated/reviewed/frozen per active task in Build."]
             from .method_registry import adapter_for
             if adapter_for(contract):
                 return ["Consume approved Intent/PRD in req; plan generates DES/TASK/CHK. Use method-run baseline --module ... --scope req/des/task/chk --evidence ... after actual AI review. Ordinary reviews are AI-delegated.",
@@ -1804,16 +1974,23 @@ class Gate:
         from .recovery import require_healthy
         require_healthy(self, state, run_dir)
         self.integrity()
-        from .method_execution import require_ready
-        require_ready(self, state, run_dir, contract)
+        from .method_registry import scripted
+        if scripted(contract):
+            from .method_execution import require_ready
+            require_ready(self, state, run_dir, contract)
         from .checks import require_design_review
         require_design_review(self, state, run_dir, contract)
         self._check_method_steps(state, contract, ("design",))
+        from .method_adapters.zsspec_docs import enabled as docs
+        if docs(contract):
+            from .services.design import require_review
+            require_review(self, state, "spec")
+            require_review(self, state, "plan")
         missing = [rel for rel in contract.get("design_artifacts", []) if not self._safe_repo_path(rel).is_file()]
         if missing:
             raise GateError("Missing required design artifacts: " + ", ".join(missing))
         required_tests = contract.get("test_files", [])
-        if required_tests:
+        if required_tests and not docs(contract):
             if set(state.get("frozen_tests", {})) != set(required_tests + contract.get("test_support_files", [])):
                 raise GateError("Freeze all contract.test_files before entering build")
             from .recovery import effective_records, baseline_id
@@ -1830,8 +2007,16 @@ class Gate:
 
     def _check_build_ready(self, state: dict[str, Any], contract: dict[str, Any]) -> None:
         self.integrity()
+        from .method_adapters.zsspec_docs import enabled as docs
+        if docs(contract) and set(contract["test_files"] + contract.get("test_support_files", [])) != set(state.get("frozen_tests", {})):
+            raise GateError("Every executable test/support file must be reviewed and frozen by its task before Verify")
+        if docs(contract):
+            from .services.execution import missing_red
+            if missing_red(self, state, contract):
+                raise GateError("Current frozen assertions need genuine Red; run-tests --suite red --target <missing test> --against-base: " + ", ".join(missing_red(self, state, contract)))
         from .method_registry import adapter_for
-        if adapter_for(contract) and state.get("method_sync_pending"):
+        from .method_registry import scripted
+        if scripted(contract) and state.get("method_sync_pending"):
             raise GateError("Run sync-projections before Verify or packaging so native statuses reflect Gate facts")
         self._check_method_steps(state, contract, ("design", "build", "review"))
         if contract.get("work_plan_required") and not state.get("work_plan"):
@@ -1955,7 +2140,8 @@ def validate_contract(contract: Any) -> list[str]:
         errors.append("code_paths cannot be empty")
     if not contract.get("design_artifacts"):
         errors.append("design_artifacts must include the accepted design/specification artifact")
-    if not contract.get("test_files"):
+    from .method_adapters.zsspec_docs import enabled as docs
+    if not contract.get("test_files") and not docs(contract):
         errors.append("test_files must include at least one executable acceptance test")
     if not isinstance(contract.get("test_commands"), dict):
         errors.append("test_commands must be an object of argv arrays")
@@ -2281,7 +2467,8 @@ def validate_verdict(verdict: Any, state: dict[str, Any], run_dir: Path, contrac
         return errors + ["verifier bundle path escapes the target repository"]
     bundle_dir = run_dir.parents[2] / Path(*bundle_rel.parts)
     bundle_meta = read_json(bundle_dir / "BUNDLE.json")
-    bundled_files = {entry.get("path") for entry in bundle_meta.get("files", [])}
+    from .services.verification import citation_paths
+    citations = citation_paths(bundle_meta)
     from .test_execution import used_waivers
     waivers = used_waivers(Gate(run_dir.parents[2]), state)
     waived_ids = {identity for waiver in waivers.values() for identity in waiver["acceptance_items"]}
@@ -2309,12 +2496,13 @@ def validate_verdict(verdict: Any, state: dict[str, Any], run_dir: Path, contrac
         if item.get("verdict") == "waived":
             waiver_paths = {entry["path"] for entry in bundle_meta.get("files", []) if entry.get("source_path") in waivers
                             and item.get("id") in waivers[entry["source_path"]]["acceptance_items"]}
-            if not waiver_paths.intersection(evidence):
+            if not waiver_paths.intersection(citations.get(e, e) for e in evidence):
                 errors.append(f"waived item {item.get('id')} must cite its bundled waiver")
         for path in evidence or []:
-            if path not in bundled_files:
+            if path not in citations:
                 errors.append(f"evidence is not in the frozen bundle manifest: {path}")
                 continue
+            path = citations[path]
             try:
                 candidate = (bundle_dir / path).resolve()
                 candidate.relative_to(bundle_dir.resolve())

@@ -15,6 +15,7 @@ PROTECTED_PREFIXES = (
     ".git/",
     ".aidevflow/", "aidevflow/", "scripts/", ".claude/settings.json",
     ".claude/agents/aidevflow-", ".claude/skills/aidevflow-", "evals/acceptance/",
+    ".zscode/extensions/aidevflow/", ".zscode/agents/aidevflow-", ".zscode/skills/aidevflow-", ".zscode/config.yml", ".zscode/settings.json", ".zscode/skills/zsspec-",
     ".omp/extensions/aidevflow/", ".omp/agents/aidevflow-", ".omp/skills/aidevflow-", ".omp/config.yml", ".omp/settings.json",
     ".claude/skills/zsspec-", ".claude/skills/.skillhub/", ".omp/skills/zsspec-",
 )
@@ -74,6 +75,18 @@ def guard(payload: dict[str, Any], root: Path) -> int:
         rel = _relative_to_root(raw, root)
         if rel is None:
             continue
+        active = root / ".aidevflow/active-run.json"
+        if active.is_file():
+            try:
+                active_state, active_run, _ = Gate(root)._load_active()
+                revision = active_state.get("engineering_revision")
+                if revision and (rel in revision["files"].values() or rel == revision.get("contract_draft")):
+                    continue
+                prefix = (active_run / "archive-staging/specs").relative_to(root).as_posix() + "/"
+                if rel.startswith(prefix) and active_state["current_stage"] == "verify" and active_state["status"] == "active" and (active_run / "archive-input.json").is_file():
+                    continue
+            except GateError:
+                pass
         if any(rel == prefix.rstrip("/") or rel.startswith(prefix) for prefix in protected_prefixes(root)):
             return _block(f"AIDevFlow protects {rel}; change it through the AIDevFlow maintainer workflow.", root, rel, "protected-path", payload)
     active_path = root / ".aidevflow" / "active-run.json"
@@ -90,12 +103,19 @@ def guard(payload: dict[str, Any], root: Path) -> int:
     write_paths = [_relative_to_root(raw, root) for raw in candidates if isinstance(raw, str) and raw]
     if write_paths and all(rel and rel.startswith(draft_prefix) for rel in write_paths) and state.get("current_stage") in ("design", "build", "verify") and state.get("status") not in ("archived", "delivery_ready", "delivery_ready_with_exceptions"):
         return 0
-    if state.get("status") in ("needs_human", "archived", "delivery_ready", "delivery_ready_with_exceptions"):
+    if state.get("status") in ("automation_stalled", "needs_human", "archived", "delivery_ready", "delivery_ready_with_exceptions"):
         return _block(f"AIDevFlow run is {state['status']}; product writes are stopped. Explain the blocker and await an explicit resume-run instruction.", root, "", "run-stopped", payload)
     frozen = set(state.get("frozen_tests", {}))
     for raw in filter(lambda value: isinstance(value, str) and value, candidates):
         rel = _relative_to_root(raw, root)
         if rel is None:
+            continue
+        if state.get("engineering_revision"):
+            if rel in state["engineering_revision"]["files"].values() or rel == state["engineering_revision"].get("contract_draft"):
+                continue
+            return _block("Engineering review is active; edit only its explicit draft files", root, rel, "engineering-drafts-only", payload)
+        archive_prefix = f".aidevflow/runs/{state['task_id']}/archive-staging/specs/"
+        if rel.startswith(archive_prefix) and state["current_stage"] == "verify" and (root / archive_prefix).parent.parent.joinpath("archive-input.json").is_file():
             continue
         if state.get("method_policy") and rel == "specs/zsspec.yml":
             return _block("Method configuration is pinned with the Contract, including its absence. Use the current policy; do not initialize or rewrite it during delivery.", root, rel, "pinned-method-config", payload)
@@ -104,6 +124,11 @@ def guard(payload: dict[str, Any], root: Path) -> int:
         if rel == f"specs/aidevflow-intake/{state['task_id']}/work-plan.json" and state.get("current_stage") == "design":
             continue
         if contract is None:
+            if state.get("method_preparation"):
+                from .services.design import preparation
+                prep = preparation(gate, state)
+                if rel in (prep["spec"], prep["plan"]) or (not state.get("knowledge_initialized") and (rel in ("specs/MAP.md", "specs/archive/INDEX.md") or (rel.startswith("specs/modules/") and rel.endswith(".md")))):
+                    continue
             if rel.startswith("specs/aidevflow-intake/") and state.get("current_stage") == "intent":
                 continue
             return _block("Product and project files are read-only while Intent is being resolved; only generated drafts under specs/aidevflow-intake/ may be written.", root, rel, "intake-read-only", payload)
@@ -116,12 +141,26 @@ def guard(payload: dict[str, Any], root: Path) -> int:
         if not matches_code and not is_design_or_test:
             return _block(f"AIDevFlow blocked an out-of-scope change to {rel}; the pinned Contract does not declare this path.", root, rel, "out-of-scope-path", payload)
         if is_design_or_test:
+            from .method_adapters.zsspec_docs import enabled as docs
+            if docs(contract) and state.get("current_stage") == "build" and rel not in contract["design_artifacts"]:
+                from .services.execution import active_task
+                task = active_task(gate, state)
+                allowed = contract["method"].get("task_tests", {}).get(task["id"], []) + contract.get("test_support_files", [])
+                if rel in allowed:
+                    continue
             if state.get("current_stage") != "design":
                 return _block(f"Specification content can only change during Design. For TASK/CHK status use work-item commands, run-tests, record-check or sync-projections; Gate writes mapped status cells. Current stage: {state.get('current_stage')}.", root, rel, "design-artifact-offstage", payload)
             continue
         if matches_code:
             if state.get("current_stage") not in ("build",):
                 return _block(f"Implementation changes are blocked during {state.get('current_stage')}; pass the Design gate first.", root, rel, "code-offstage", payload)
+            from .method_adapters.zsspec_docs import enabled as docs
+            if docs(contract):
+                from .services.execution import implementation_errors
+                problem = implementation_errors(gate, state, contract)
+                if problem:
+                    return _block(problem, root, rel, "task-test-admission", payload)
+                continue
             if not state.get("frozen_tests"):
                 return _block("Implementation changes are blocked until required tests are frozen.", root, rel, "tests-not-frozen", payload)
             required = set(contract.get("red_test_files", contract.get("test_files", [])))

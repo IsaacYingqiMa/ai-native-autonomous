@@ -21,8 +21,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     install = sub.add_parser("install", help="install AIDevFlow and a native coding-agent adapter")
-    install.add_argument("--runtime", choices=("omp", "claude-code"), default="omp")
-    install.add_argument("--skills-root", help="project-local method root; auto discovers .omp/skills or .claude/skills")
+    from .runtimes import NAMES
+    install.add_argument("--runtime", choices=NAMES, default="omp")
+    install.add_argument("--skills-root", help="project-local method root; explicit selection is required when multiple roots exist")
     install.add_argument("--workflow-profile", choices=("legacy", "reviewed-discovery-v1"))
     discovery = sub.add_parser("discovery-create", help="start read-only Intent/PRD preparation")
     discovery.add_argument("--request", required=True)
@@ -57,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="show active workflow state")
     status.add_argument("--summary", action="store_true", help="skip candidate hashing; never use as evidence of acceptance")
     context = sub.add_parser("role-context", help="prepare a read-only native role assignment from the current Gate checkpoint")
-    context.add_argument("--role", choices=("intent_analyst", "requirements_analyst", "contract_planner", "verifier"), required=True)
+    context.add_argument("--role", choices=("intent_analyst", "requirements_analyst", "contract_planner", "artifact_reviewer", "verifier"), required=True)
     doctor = sub.add_parser("doctor", help="read-only runtime preflight; does not dispatch agents")
     doctor.add_argument("--session-id", help="inspect native transcript capabilities without importing observations")
     recover = sub.add_parser("recover-runtime", help="recover actual native role results lost to cancelled/missing Hooks")
@@ -65,6 +66,21 @@ def build_parser() -> argparse.ArgumentParser:
     continuation = sub.add_parser("continuation", help="select one owner of turn continuation; never accepts business work")
     continuation.add_argument("--owner", required=True, choices=("native", "bounded_stop", "manual"))
     sub.add_parser("sync-projections", help="project Gate state into registered generated-document status cells")
+    prepare = sub.add_parser("prepare-method", help="pin the current method after Intent/PRD approval")
+    prepare.add_argument("--slug")
+    review = sub.add_parser("prepare-artifact-review", help="prepare immutable independent spec/plan review inputs")
+    review.add_argument("--kind", required=True, choices=("spec", "plan"))
+    review = sub.add_parser("record-artifact-review", help="record unchanged native reviewer output")
+    review.add_argument("--path", required=True)
+    revision = sub.add_parser("begin-engineering-revision", help="prepare a scope-preserving correction for independent review")
+    revision.add_argument("--reason", required=True)
+    sub.add_parser("commit-engineering-revision", help="apply independently reviewed engineering corrections")
+    sub.add_parser("recover-engineering-revision", help="finish an interrupted reviewed correction")
+    for name in ("prepare-delivery-archive", "seal-delivery-archive", "commit-delivery-archive", "recover-delivery-archive", "reset-delivery-archive"):
+        sub.add_parser(name, help="controlled staged archive and recovery")
+    sub.add_parser("record-initialization", help="record verified knowledge skeleton readiness")
+    sub.add_parser("compile-work-plan", help="derive work items from reviewed task cards")
+    sub.add_parser("recover-routine", help="recover a legacy ordinary-repair budget stop under the existing requirements approval")
     sub.add_parser("method-inspect", help="discover/cache a candidate method description; never activates a task")
     method = sub.add_parser("method-run", help="run the task's pinned method on staged specs")
     method.add_argument("operation", choices=("status", "verify", "gate", "baseline", "report", "sync"))
@@ -103,7 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
     advance = sub.add_parser("advance", help="perform a validated transition to the next stage")
     advance.add_argument("--to", required=True)
 
-    freeze = sub.add_parser("freeze-tests", help="hash contract test files during Design")
+    freeze = sub.add_parser("freeze-tests", help="freeze reviewed task tests; legacy profiles freeze during Design")
     freeze.add_argument("paths", nargs="*")
 
     work_plan = sub.add_parser("register-work-plan", help="validate and pin a method-neutral work plan during Design")
@@ -114,6 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     work_complete = sub.add_parser("complete-work-item", help="complete a registered work item with evidence")
     work_complete.add_argument("--id", required=True)
+    work_complete.add_argument("--observation", default="", help="concrete actual observation for zsspec task cards")
     work_complete.add_argument("--evidence", required=True, nargs="+", help="one or more repository-relative evidence paths")
 
     work_reopen = sub.add_parser("reopen-work-item", help="reopen a completed work item during Build")
@@ -132,6 +149,9 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--reviewer", required=True)
     check.add_argument("--reason", required=True)
     check.add_argument("--evidence", required=True, nargs="+")
+    check.add_argument("--observations", help="candidate-bound approved-scenario observations for current-method runtime checks")
+    check = sub.add_parser("check-context", help="read approved scenarios and expected outcomes for one runtime check")
+    check.add_argument("--id", required=True)
 
     sub.add_parser("integrity", help="verify frozen test hashes")
 
@@ -231,11 +251,8 @@ def _main(argv: list[str] | None = None) -> int:
             result = doctor(Path(args.root))
             if args.session_id:
                 from .runtimes import selected
-                if selected(Path(args.root)) == "omp":
-                    from .omp import inspect_session
-                else:
-                    from .runtime import inspect_session
-                report = inspect_session(Path(args.root), args.session_id)
+                from .runtimes.registry import get_runtime
+                report = get_runtime(selected(Path(args.root))).inspect_session(Path(args.root), args.session_id)
                 result["native_session"] = {k: v for k, v in report.items() if k != "events"}
                 result["native_session"]["recoverable_events"] = len(report["events"])
         elif args.command == "recover-runtime":
@@ -244,6 +261,31 @@ def _main(argv: list[str] | None = None) -> int:
         elif args.command == "continuation":
             from .continuation import set_owner
             result = set_owner(Path(args.root), args.owner)
+        elif args.command.endswith("engineering-revision"):
+            from .services import revisions
+            result = revisions.begin(gate, args.reason) if args.command == "begin-engineering-revision" else revisions.recover(gate) if args.command == "recover-engineering-revision" else revisions.commit(gate)
+        elif args.command.endswith("delivery-archive"):
+            from .services import delivery
+            fn = {"prepare-delivery-archive": delivery.prepare, "seal-delivery-archive": delivery.seal,
+                  "commit-delivery-archive": delivery.commit, "recover-delivery-archive": lambda g: delivery.commit(g, recover=True),
+                  "reset-delivery-archive": delivery.reset}[args.command]
+            result = fn(gate)
+        elif args.command == "prepare-method":
+            from .services.design import prepare_method
+            state, _, _ = gate._load_active()
+            result = prepare_method(gate, args.slug or state["task_id"].lower())
+        elif args.command == "prepare-artifact-review":
+            from .services.design import prepare_review
+            result = prepare_review(gate, args.kind)
+        elif args.command == "record-artifact-review":
+            from .services.design import record_review
+            result = record_review(gate, args.path)
+        elif args.command == "record-initialization":
+            from .services.design import record_initialization
+            result = record_initialization(gate)
+        elif args.command == "compile-work-plan":
+            from .services.design import compile_plan
+            result = compile_plan(gate)
         elif args.command == "method-inspect":
             from .method_resolution import discover
             result = discover(Path(args.root).resolve())
@@ -260,6 +302,9 @@ def _main(argv: list[str] | None = None) -> int:
             result = gate.sync_projections()
         elif args.command == "resume-run":
             result = gate.resume_run(args.by, args.utterance, args.additional_attempts, args.mode)
+        elif args.command == "recover-routine":
+            from .services.autonomy import recover_routine
+            result = recover_routine(gate)
         elif args.command == "rebuild":
             result = gate.rebuild(args.task_id)
         elif args.command == "record-intent":
@@ -279,7 +324,7 @@ def _main(argv: list[str] | None = None) -> int:
         elif args.command == "start-work-item":
             result = gate.start_work_item(args.id)
         elif args.command == "complete-work-item":
-            result = gate.complete_work_item(args.id, args.evidence)
+            result = gate.complete_work_item(args.id, args.evidence, args.observation)
         elif args.command == "reopen-work-item":
             result = gate.reopen_work_item(args.id, args.reason)
         elif args.command == "integrity":
@@ -287,7 +332,10 @@ def _main(argv: list[str] | None = None) -> int:
         elif args.command == "record-design-review":
             result = gate.record_design_review(args.reviewer, args.reason, args.evidence)
         elif args.command == "record-check":
-            result = gate.record_check(args.id, args.result, args.candidate, args.reviewer, args.reason, args.evidence)
+            result = gate.record_check(args.id, args.result, args.candidate, args.reviewer, args.reason, args.evidence, args.observations)
+        elif args.command == "check-context":
+            from .services.observations import context
+            result = context(gate, args.id)
         elif args.command == "run-tests":
             result = gate.run_tests(args.suite, args.target, args.evidence, against_base=args.against_base)
         elif args.command == "diagnose-evidence":
@@ -344,6 +392,9 @@ def _main(argv: list[str] | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     args = build_parser().parse_args(argv)
     if args.command in ("doctor", "status", "discovery-status", "role-context", "diagnose-evidence", "install",
                         "method-inspect", "method-run", "method-recover", "method-accept", "sync-projections"):

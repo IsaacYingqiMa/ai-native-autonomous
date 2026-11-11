@@ -162,8 +162,9 @@ class Discovery:
     def create(self, request: str, *, request_text: str | None = None):
         gate = Gate(self.root)
         gate._assert_git_root()
-        if not reviewed(self.root) or project_config(self.root).get("runtime") != "omp":
-            raise GateError("Discovery requires omp with workflow_profile=reviewed-discovery-v1")
+        from .runtimes.registry import get_runtime
+        if not reviewed(self.root) or not get_runtime(project_config(self.root).get("runtime", "claude-code")).reviewed_discovery:
+            raise GateError("Discovery requires a native approval adapter with workflow_profile=reviewed-discovery-v1")
         if self.active.exists() or gate.active_path.exists() or self.transaction.exists():
             raise GateError("An active context or handoff already exists; resume it first")
         source = gate._safe_repo_path(request) if request_text is None else None
@@ -197,7 +198,7 @@ class Discovery:
             raise GateError("Requirement source must reference the snapshotted request or a Gate-recorded answer")
         from .receipts import completed_results, execution_context, read_invocations
         receipts = completed_results(read_invocations(directory), "requirements_analyst", digest(value), 0, None,
-                                     execution_context(state), "omp")
+                                     execution_context(state), state["execution_binding"]["runtime"])
         if not receipts:
             raise GateError("Requirements require a completed current native analyst receipt")
         prior = [int(p.name) for p in (directory / "revisions").glob("*") if p.is_dir() and p.name.isdecimal()]

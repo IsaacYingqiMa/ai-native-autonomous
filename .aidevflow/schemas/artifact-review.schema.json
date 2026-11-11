@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "task_id",
+    "kind",
+    "input_sha256",
+    "outcome",
+    "coverage",
+    "findings"
+  ],
+  "properties": {
+    "schema": {
+      "const": "aidevflow/artifact-review-v1"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "spec",
+        "plan",
+        "blind"
+      ]
+    },
+    "input_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "outcome": {
+      "enum": [
+        "pass",
+        "changes_required",
+        "requires_decision"
+      ]
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "pattern": "^S[0-9]+$"
+        },
+        "minItems": 1
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

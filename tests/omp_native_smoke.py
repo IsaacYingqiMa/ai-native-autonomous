@@ -19,10 +19,10 @@ sys.path.insert(0, str(SOURCE))
 from aidevflow.installer import install
 
 
-def main() -> int:
-    executable = shutil.which("omp")
+def main(runtime="omp") -> int:
+    executable = shutil.which(runtime)
     if not executable:
-        print("OMP is not installed on PATH", file=sys.stderr)
+        print(f"{runtime} is not installed on PATH", file=sys.stderr)
         return 2
     base = SOURCE / ".test-tmp"
     base.mkdir(exist_ok=True)
@@ -30,7 +30,7 @@ def main() -> int:
         root = Path(directory).resolve()
         root.relative_to(base.resolve())  # Validate the recursive cleanup boundary.
         subprocess.run(["git", "-c", "core.fsmonitor=false", "init", "-q"], cwd=root, check=True, capture_output=True)
-        install(SOURCE, root, runtime="omp", workflow_profile="reviewed-discovery-v1")
+        install(SOURCE, root, runtime=runtime, workflow_profile="reviewed-discovery-v1")
         process = subprocess.Popen([executable, "--cwd", str(root), "--mode", "rpc", "--no-ui",
                                     "--no-title", "--no-context-files", "--no-rules", "--no-lsp"],
                                    cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -89,4 +89,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--runtime", choices=("omp", "zscode"), default="omp")
+    raise SystemExit(main(parser.parse_args().runtime))

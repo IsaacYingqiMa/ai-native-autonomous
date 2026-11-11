@@ -9,6 +9,7 @@ from typing import Any
 
 PROFILE = "zsspec-managed-v1"
 from .method_registry import V2, adapter_for
+from .method_adapters.zsspec_docs import PROFILE as DOCS
 DESIGN_SKILLS = ["zsspec-req", "zsspec-des", "zsspec-task", "zsspec-chk", "zsspec-verify"]
 DEFAULTS = {"paths": {"skills_root": "auto"}, "test": {"e2e": "enabled", "manual": "enabled"},
             "parallel": {"mode": "auto", "max": "3"}, "gate": {"mode": "strict"}}
@@ -16,7 +17,7 @@ DEFAULTS = {"paths": {"skills_root": "auto"}, "test": {"e2e": "enabled", "manual
 
 def enabled(contract: dict[str, Any] | None) -> bool:
     method = contract.get("method") if isinstance(contract, dict) else None
-    return isinstance(method, dict) and method.get("profile") in (PROFILE, V2)
+    return isinstance(method, dict) and method.get("profile") in (PROFILE, V2, DOCS)
 
 
 def file_hash(path: Path) -> str | None:
@@ -103,10 +104,10 @@ def read_policy(root: Path, contract: dict | None = None) -> dict[str, Any]:
             raise GateError(f"Invalid zsspec.yml test.{key}; use enabled or disabled")
     if values["parallel"]["mode"] not in ("auto", "off") or not values["parallel"]["max"].isdigit() or int(values["parallel"]["max"]) < 1:
         raise GateError("Invalid zsspec.yml parallel configuration")
-    return {"schema": "aidevflow/method-policy-v1", "profile": V2 if adapter_for(contract) else PROFILE,
+    return {"schema": "aidevflow/method-policy-v1", "profile": contract["method"]["profile"] if adapter_for(contract) else PROFILE,
             "config_path": "specs/zsspec.yml", "config_sha256": file_hash(path), "configured": values,
             "effective": {"skills_root": effective_root, "gate": "strict", "parallel": "off",
-                          "review": "ai_coordinator", "tests": "design_frozen", **values["test"]}}
+                          "review": "ai_coordinator", "tests": "task_frozen" if contract and contract.get("method", {}).get("profile") == DOCS else "design_frozen", **values["test"]}}
 
 
 def artifact_path(contract: dict[str, Any], relative: str) -> bool:
@@ -118,7 +119,7 @@ def validation_errors(contract: dict[str, Any]) -> list[str]:
     method = contract.get("method", {})
     if not isinstance(method, dict) or "profile" not in method:
         return []
-    if method["profile"] not in (PROFILE, V2):
+    if method["profile"] not in (PROFILE, V2, DOCS):
         return [f"Unknown method profile; supported: {PROFILE}, {V2}"]
     errors = []
     adapter = adapter_for(contract)

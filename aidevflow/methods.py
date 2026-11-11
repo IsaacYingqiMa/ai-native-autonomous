@@ -31,7 +31,8 @@ def available_skill_errors(root: Path, contract: dict[str, Any]) -> list[str]:
             except ValueError:
                 errors.append(f"method skill {name!r} has an invalid path")
     from .managed import enabled
-    if enabled(contract):
+    from .method_adapters.zsspec_docs import enabled as docs
+    if enabled(contract) and not docs(contract):
         for name in ("zsspec-standard", "zsspec-change"):
             if not skill_path(root, name).is_file():
                 errors.append(f"managed method support skill {name!r} is not installed")

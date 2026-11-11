@@ -7,20 +7,27 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+from .registry import get_runtime, ADAPTERS
 
-NAMES = ("omp", "claude-code")
+NAMES = tuple(name for name, adapter in ADAPTERS.items() if adapter.enabled)
 
 
 def project_config(root: Path) -> dict[str, Any]:
-    from .gate import read_json, GateError
+    from ..gate import read_json, GateError
     path = root / ".aidevflow/project.json"
     value = read_json(path) if path.is_file() else {}
     if not isinstance(value, dict) or value.get("runtime", "claude-code") not in NAMES:
         raise GateError("Invalid AIDevFlow project runtime configuration")
+    local_path = root / ".aidevflow/local.json"
+    if local_path.is_file():
+        local = read_json(local_path)
+        if not isinstance(local, dict) or not isinstance(local.get("python"), str) or not local["python"].strip():
+            raise GateError("Invalid local interpreter configuration; reinstall from the intended Python environment")
+        value = {**value, "python": local["python"]}
     if value.get("workflow_profile") not in (None, "legacy", "reviewed-discovery-v1"):
         raise GateError("Unsupported workflow_profile")
-    if value.get("workflow_profile") == "reviewed-discovery-v1" and value.get("runtime") != "omp":
-        raise GateError("reviewed-discovery-v1 currently requires omp")
+    if value.get("workflow_profile") == "reviewed-discovery-v1" and not get_runtime(value.get("runtime", "claude-code")).reviewed_discovery:
+        raise GateError("reviewed-discovery-v1 requires a verified native approval adapter")
     for field in ("skills_root", "python"):
         if field in value and (not isinstance(value[field], str) or not value[field].strip()):
             raise GateError(f"Invalid project configuration field: {field}")
@@ -34,10 +41,10 @@ def selected(root: Path, state: dict[str, Any] | None = None) -> str:
             raise ValueError("Invalid execution binding")
         name = bound.get("runtime", "claude-code")
     else:
-        from .gate import read_json
+        from ..gate import read_json
         active = root / ".aidevflow/active-run.json"
         if active.is_file():
-            from .gate import safe_id
+            from ..gate import safe_id
             task = safe_id(read_json(active).get("task_id", ""))
             return selected(root, read_json(root / ".aidevflow/runs" / task / "run-state.json"))
         name = project_config(root).get("runtime", "claude-code")
@@ -49,12 +56,12 @@ def selected(root: Path, state: dict[str, Any] | None = None) -> str:
 def binding(root: Path) -> dict[str, Any]:
     name = project_config(root).get("runtime", "claude-code")
     return {"schema": "aidevflow/execution-binding-v1", "runtime": name,
-            "adapter_version": "omp-v1" if name == "omp" else "claude-observer-b2",
+            "adapter_version": get_runtime(name).adapter_version,
             "skills_root": project_config(root).get("skills_root", ".claude/skills")}
 
 
 def skills_root(root: Path) -> Path:
-    from .gate import read_json, safe_id
+    from ..gate import read_json, safe_id
     active = root / ".aidevflow/active-run.json"
     value = None
     if active.is_file():
@@ -73,15 +80,12 @@ def skills_root(root: Path) -> Path:
 
 
 def recover(root: Path, session: str | None = None) -> dict[str, Any]:
-    if selected(root) == "omp":
-        from .omp import recover as recover_omp
-        return recover_omp(root, session)
-    from .runtime import recover as recover_claude
-    return recover_claude(root, session)
+    return get_runtime(selected(root)).recover(root, session)
 
 
 def identity(name: str) -> dict[str, Any]:
-    executable = shutil.which("omp" if name == "omp" else "claude")
+    from .registry import get_runtime
+    executable = shutil.which(get_runtime(name).executable)
     version, error = None, None
     if executable:
         try:
@@ -95,7 +99,7 @@ def identity(name: str) -> dict[str, Any]:
             error = "version_probe_failed"
     return {"runtime": name, "executable": executable, "installed_version": version,
             "running_version": None, "version_probe_error": error,
-            "adapter_version": "omp-v1" if name == "omp" else "claude-observer-b2"}
+            "adapter_version": get_runtime(name).adapter_version}
 
 
 def digest(value: Any) -> str:

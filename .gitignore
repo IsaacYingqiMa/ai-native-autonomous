@@ -27,3 +27,5 @@ bash.exe.stackdump
 .aidevflow/discoveries/
 .aidevflow/active-discovery.json
 .aidevflow/discovery-handoff.json
+
+.aidevflow/local.json

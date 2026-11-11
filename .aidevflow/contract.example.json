@@ -4,28 +4,27 @@
   "title": "Sample feature task",
   "method": {
     "name": "zsspec",
-    "profile": "zsspec-managed-v2",
-    "modules": [
-      "feature"
-    ],
+    "profile": "zsspec-docs-v2",
+    "slug": "feature",
     "acceptance_map": {
       "REQ-feature-目标": [
-        "AC-feature-目标-结果"
+        "S1"
+      ]
+    },
+    "task_tests": {
+      "S1-1": [
+        "tests/test_feature.py"
       ]
     },
     "stages": {
       "design": [
-        "zsspec-req",
-        "zsspec-plan",
-        "zsspec-test"
+        "zsspec-spec",
+        "zsspec-plan"
       ],
       "build": [
         "zsspec-apply"
       ],
-      "review": [
-        "zsspec-test",
-        "zsspec-done"
-      ]
+      "review": []
     }
   },
   "max_repair_attempts": 3,
@@ -43,10 +42,8 @@
     "playwright-report"
   ],
   "design_artifacts": [
-    "specs/requirement/feature/REQ-feature.md",
-    "specs/design/feature/DES-feature-后端.md",
-    "specs/task/feature/TASK-feature.md",
-    "specs/checklist/feature/CHK-feature.md"
+    "specs/active/feature/spec.md",
+    "specs/active/feature/plan.md"
   ],
   "test_files": [
     "tests/test_feature.py"
