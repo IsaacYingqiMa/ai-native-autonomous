@@ -22,30 +22,32 @@ from aidevflow.discovery import Discovery
 from aidevflow.gate import read_json
 
 
-def main(delay_seconds=0, stop_probe=False):
-    executable = shutil.which("omp")
+def main(delay_seconds=0, stop_probe=False, runtime="omp"):
+    native = ".zscode" if runtime == "zscode" else ".omp"
+    executable = shutil.which(runtime)
     if not executable:
         return 2
     fixture = DiscoveryTests("test_no_legacy_entrypoint_or_product_write_can_bypass_discovery")
+    fixture.RUNTIME, fixture.NATIVE = runtime, native
     fixture.setUp()
     process = None
     readers = []
     try:
         root = fixture.root
         root.resolve().relative_to((SOURCE / ".test-tmp").resolve())
-        install(SOURCE, root, "omp", skills_root=".omp/skills", workflow_profile="reviewed-discovery-v1")
+        install(SOURCE, root, runtime, skills_root=native + "/skills", workflow_profile="reviewed-discovery-v1")
         example = read_json(root / ".aidevflow/contract.example.json")
         names = {name for group in example["method"]["stages"].values() for name in group}
-        for name in names | {"zsspec-standard", "zsspec-change"}:
-            shutil.copytree(SOURCE / '.claude/skills' / name, root / '.omp/skills' / name,
+        for name in names | {"zsspec-init", "zsspec-archive"}:
+            shutil.copytree(SOURCE / '.claude/skills' / name, root / (native + "/skills") / name,
                             dirs_exist_ok=True, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-        shutil.copy2(SOURCE / '.claude/skills/README.md', root / '.omp/skills/README.md')
+        shutil.copy2(SOURCE / '.claude/skills/README.md', root / (native + "/skills/README.md"))
         fixture.record()
         if stop_probe:
             # Exercise the real extension's stop handler, without any model request.
             # Poison the stop-bound UI: review must use the completed lifecycle UI.
             from aidevflow.gate import sha256_file, write_json_atomic
-            extension = root / '.omp/extensions/aidevflow'
+            extension = root / (native + "/extensions/aidevflow")
             implementation = extension / 'implementation.ts'
             implementation.write_text((extension / 'index.ts').read_text(encoding='utf-8'), encoding='utf-8')
             (extension / 'index.ts').write_text('''import original from "./implementation";
@@ -161,7 +163,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--delay-seconds', type=float, default=0)
     parser.add_argument('--from-stop', action='store_true')
+    parser.add_argument("--runtime", choices=("omp", "zscode"), default="omp")
     args = parser.parse_args()
     if not 0 <= args.delay_seconds <= 120:
         parser.error('delay must be between 0 and 120 seconds')
-    raise SystemExit(main(args.delay_seconds, args.from_stop))
+    raise SystemExit(main(args.delay_seconds, args.from_stop, args.runtime))

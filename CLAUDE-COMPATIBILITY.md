@@ -1,3 +1,5 @@
+> 历史协议/验证记录：当前五技能包的 OMP 流程见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [README.md](README.md)。旧记录不代表当前版本已通过。
+
 # Claude observer B：变更说明与完整使用教程
 
 **当前行为以 [Observer B2 修复与重跑指南](RUNTIME-COMPATIBILITY.md) 为准。** 下文 b1 的测试与演练记录保留为历史；“只依赖 Hook”“Stop 始终仅观察”等描述不适用于 B2 新建自主任务。旧运行规则不自动迁移。

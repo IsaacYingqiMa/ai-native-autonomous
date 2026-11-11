@@ -232,7 +232,8 @@ class IsolatedRedTests(GateFixture):
     def test_replay_uses_original_implementation_not_current_passing_code(self):
         self._reach_design()
         self.gate.freeze_tests([])
-        self.assertTrue(self.gate.run_tests("red", TARGET)["valid_red"])
+        initial_red = self.gate.run_tests("red", TARGET)
+        self.assertTrue(initial_red["valid_red"], initial_red)
         self.gate.advance("build")
         (self.root / "src/sample.py").write_text("def value():\n    return 2\n", encoding="utf-8")
         base, proposal = RecoveryTests.draft(self)

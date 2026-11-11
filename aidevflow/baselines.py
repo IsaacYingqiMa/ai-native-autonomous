@@ -82,7 +82,7 @@ def draft_file(gate, state: dict, rel: str) -> Path:
 
 def allowed_target(gate, path: str, allowed: set[str]) -> Path:
     result = gate._safe_repo_path(path)
-    if path not in allowed or result.relative_to(gate.root).as_posix() != path or result.relative_to(gate.root).parts[0] in (".git", ".aidevflow", ".claude", ".omp", "aidevflow") or path.startswith("scripts/aidevflow") or path == "specs/zsspec.yml":
+    if path not in allowed or result.relative_to(gate.root).as_posix() != path or result.relative_to(gate.root).parts[0] in (".git", ".aidevflow", ".claude", ".omp", ".zscode", "aidevflow") or path.startswith("scripts/aidevflow") or path == "specs/zsspec.yml":
         raise GateError("Baseline revision may change only declared test/support/spec files, never implementation or method configuration")
     return result
 
@@ -91,6 +91,9 @@ def plan_revision(gate, draft_path: str) -> dict:
     state, run, contract = gate._load_active()
     if not contract or state["current_stage"] not in ("design", "build", "verify") or state["status"] in ("archived", "delivery_ready", "delivery_ready_with_exceptions"):
         raise GateError("A baseline revision requires an open Design/Build/Verify task")
+    from .method_adapters.zsspec_docs import enabled as docs
+    if docs(contract):
+        raise GateError("Use begin-engineering-revision and independent spec/plan review for current-method technical corrections")
     draft = read_json(draft_file(gate, state, draft_path))
     if (not isinstance(draft, dict) or set(draft) - {"schema", "reason", "changes", "contract_draft", "work_plan_draft"}
             or draft.get("schema") != "aidevflow/baseline-revision-v1" or not isinstance(draft.get("reason"), str) or not draft["reason"].strip()):
@@ -155,7 +158,8 @@ def plan_revision(gate, draft_path: str) -> dict:
         acceptance = {item["id"] for item in new_contract.get("acceptance_items", [])}
         if acceptance - {ref for item in plan["items"] for ref in item.get("acceptance_items", [])}:
             raise GateError("Revised work plan must cover all acceptance items")
-    if adapter_for(new_contract):
+    from .method_registry import scripted
+    if scripted(new_contract):
         from .method_execution import validate_revision
         validate_revision(gate, state, new_contract, plan, files)
     proposal = {"schema": "aidevflow/baseline-proposal-v1", "id": "BL-" + secrets.token_hex(12),

@@ -20,6 +20,10 @@ def adapter_for(contract: dict | None) -> MethodAdapter | None:
     method = contract.get("method") if isinstance(contract, dict) else None
     if not isinstance(method, dict):
         return None
+    from .method_adapters.zsspec_docs import PROFILE
+    if method.get("profile") == PROFILE:
+        from .method_adapters.zsspec_docs import ZsspecDocsAdapter
+        return ZsspecDocsAdapter()
     if method.get("profile") == V2:
         from .method_adapters.zsspec import ZsspecAdapter
         return ZsspecAdapter()
@@ -27,4 +31,5 @@ def adapter_for(contract: dict | None) -> MethodAdapter | None:
 
 
 def scripted(contract: dict | None) -> bool:
-    return adapter_for(contract) is not None
+    adapter = adapter_for(contract)
+    return adapter is not None and getattr(adapter, "scripted", True)

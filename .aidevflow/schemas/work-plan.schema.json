@@ -101,7 +101,8 @@
     "method_profile": {
       "enum": [
         "zsspec-managed-v1",
-        "zsspec-managed-v2"
+        "zsspec-managed-v2",
+        "zsspec-docs-v2"
       ]
     }
   }

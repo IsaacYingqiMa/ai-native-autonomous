@@ -204,8 +204,8 @@ def _execute(root, operation, module, scope, evidence, *, by, utterance):
     with writer_lock(gate.control):
         state, run, contract = gate._load_active()
         adapter = adapter_for(contract)
-        if adapter is None:
-            raise GateError("This operation requires a scripted method adapter")
+        if adapter is None or not getattr(adapter, "scripted", True):
+            raise GateError("This operation requires a historical scripted adapter; current zsspec uses artifact reviews and delivery archive commands")
         if operation == "close":
             if state["current_stage"] != "delivery_ready" or not by.strip() or not utterance.strip():
                 raise GateError("Method close requires delivery_ready and actual user business acceptance")

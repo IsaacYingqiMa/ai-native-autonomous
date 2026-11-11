@@ -27,6 +27,10 @@ def decide(root: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
     paths = list((run_dir / "agent-invocations").glob("*.json"))
     if contract:
         paths += [root / rel for key in ("design_artifacts", "test_files", "test_support_files") for rel in contract.get(key, [])]
+    if state.get("method_preparation"):
+        from .services.design import preparation
+        prepared = preparation(gate, state)
+        paths += [root / prepared[key] for key in ("spec", "plan")]
     paths += list((root / "specs/aidevflow-intake" / state["task_id"]).glob("*.json"))
     signature = {"revision": state.get("revision", 0), "updated_at": state.get("updated_at"), "stage": state["current_stage"], "status": state["status"],
                  "files": {str(p.relative_to(root)): sha256_file(p) for p in paths if p.is_file()}}

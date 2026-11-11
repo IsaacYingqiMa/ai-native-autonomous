@@ -2,6 +2,9 @@ import { test, expect, mock } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
+const runtime = process.env.AIDEVFLOW_TEST_RUNTIME || "omp";
+const nativeRoot = runtime === "zscode" ? ".zscode" : ".omp";
+
 const requests: Array<{ action: string; payload: any }> = [];
 let bridgeError: Error | undefined;
 let bridgeErrorAction: string | undefined;
@@ -14,7 +17,7 @@ let reviewResponse: any = { action: "deliver", task_id: "ADF-test", replayed: fa
 let reviewDiscussionOnly = false;
 let onReviewPrepare: (() => void) | undefined;
 let onReviewRespond: (() => void) | undefined;
-mock.module("../integrations/omp/client", () => ({ Bridge: class {
+mock.module("../integrations/" + runtime + "/client", () => ({ Bridge: class {
   request(action: string, payload: any) { requests.push({ action, payload });
     if (bridgeError && (!bridgeErrorAction || bridgeErrorAction === action)) return Promise.reject(bridgeError);
     if (action === "review-prepare") {
@@ -31,7 +34,7 @@ mock.module("../integrations/omp/client", () => ({ Bridge: class {
     { task_call: { context: "Gate context", tasks: [{ agent: "aidevflow-independent-verifier", task: "Read only bundle-1", solutionSpace: "bounded" }] } } : {}); }
   close() {}
 } }));
-const { default: install } = await import("../integrations/omp/index");
+const { default: install } = await import("../integrations/" + runtime + "/index");
 
 function fixture() {
   const dir = mkdtempSync(join(process.cwd(), ".test-tmp/omp-ts-"));
@@ -76,8 +79,8 @@ function reviewedFixture() {
   workflowProfile = "reviewed-discovery-v1";
   unlinkSync(join(f.ctx.cwd, ".aidevflow/active-run.json"));
   writeFileSync(join(f.ctx.cwd, ".aidevflow/active-discovery.json"), "{}");
-  mkdirSync(join(f.ctx.cwd, ".omp/skills/aidevflow-flow"), { recursive: true });
-  writeFileSync(join(f.ctx.cwd, ".omp/skills/aidevflow-flow/SKILL.md"), "Gate delivery playbook");
+  mkdirSync(join(f.ctx.cwd, nativeRoot + "/skills/aidevflow-flow"), { recursive: true });
+  writeFileSync(join(f.ctx.cwd, nativeRoot + "/skills/aidevflow-flow/SKILL.md"), "Gate delivery playbook");
   return f;
 }
 
@@ -353,8 +356,9 @@ test("native preflight reports tools and prevents starting a misconfigured flow"
     await (f.commands.get("aidevflow-flow") as any).handler("build", f.ctx);
     expect(f.prompts.length).toBe(0);
     expect(f.messages[0].customType).toBe("aidevflow.preflight");
-    expect(requests[0].payload.tools).toEqual(["read", "bash", "task"]);
-    expect(requests[0].payload.skill_commands).toEqual(["skill:zsspec-req"]);
+    expect(requests.find(request => request.action === "preflight")?.payload.tools).toEqual(["read", "bash", "task"]);
+    expect(requests[0].action).toBe("resume-checkpoint");
+    expect(requests.find(request => request.action === "preflight")?.payload.skill_commands).toEqual(["skill:zsspec-req"]);
   } finally { f.cleanup(); }
 });
 
@@ -474,8 +478,8 @@ test("Verifier assignment is replaced with Gate prepared bundle context", async 
 
 test("Verifier has a sealed base prompt and drops injected memory and peer notes", async () => {
   const f = fixture();
-  mkdirSync(join(f.ctx.cwd, ".omp/agents"), { recursive: true });
-  writeFileSync(join(f.ctx.cwd, ".omp/agents/aidevflow-independent-verifier.md"), "---\nname: verifier\n---\nOnly assess the frozen bundle.");
+  mkdirSync(join(f.ctx.cwd, nativeRoot + "/agents"), { recursive: true });
+  writeFileSync(join(f.ctx.cwd, nativeRoot + "/agents/aidevflow-independent-verifier.md"), "---\nname: verifier\n---\nOnly assess the frozen bundle.");
   const ctx = { ...f.ctx, agent: { kind: "sub", name: "aidevflow-independent-verifier" } };
   try { const prepared = await f.hooks.get("before_agent_start")!({ prompt: "Gate bundle assignment" }, ctx);
     expect(prepared.systemPrompt).toEqual(["Only assess the frozen bundle."]);

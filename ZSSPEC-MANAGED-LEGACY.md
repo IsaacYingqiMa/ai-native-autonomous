@@ -1,3 +1,5 @@
+> 历史协议/验证记录：当前五技能包的 OMP 流程见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [README.md](README.md)。旧记录不代表当前版本已通过。
+
 # 新版 zsspec 与 AIDevFlow 的串行托管使用说明
 
 2026-10-27 Observer B2 补充：新建自主任务以真实产物审查作为方法门槛，Skill 观察缺失只作诊断；五阶段、方法调用顺序、测试冻结和独立验收仍需执行。具体执行恢复、续跑限制和重新安装方式见 [运行兼容性指南](RUNTIME-COMPATIBILITY.md)。旧任务保留原门槛。

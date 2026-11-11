@@ -54,6 +54,10 @@ def record_design_review(gate: Any, reviewer: str, reason: str, paths: list[str]
     from .gate import GateError, sha256_file, utc_now, write_json_atomic
     from .managed import enabled
     state, run_dir, contract = gate._load_active()
+    from .method_adapters.zsspec_docs import enabled as docs
+    if docs(contract) and state["current_stage"] == "build":
+        from .services.execution import record_test_review
+        return record_test_review(gate, state, run_dir, contract, reviewer, reason, paths)
     gate._require_stage(state, "design")
     gate.integrity()
     if not enabled(contract):
@@ -91,6 +95,12 @@ def design_subjects(gate: Any, state: dict, contract: dict) -> dict:
 def require_design_review(gate: Any, state: dict, run_dir: Path, contract: dict) -> None:
     from .gate import GateError, read_json, sha256_file
     from .managed import enabled
+    from .method_adapters.zsspec_docs import enabled as docs
+    if docs(contract):
+        from .services.design import require_review
+        require_review(gate, state, "spec")
+        require_review(gate, state, "plan")
+        return
     if not enabled(contract):
         return
     reference = state.get("design_review")
@@ -107,7 +117,7 @@ def require_design_review(gate: Any, state: dict, run_dir: Path, contract: dict)
 
 
 def record_check(gate: Any, check_id: str, result: str, candidate: str,
-                 reviewer: str, reason: str, paths: list[str]) -> dict:
+                 reviewer: str, reason: str, paths: list[str], observations: str | None = None) -> dict:
     from .gate import GateError, sha256_file, utc_now, write_json_atomic
     state, run_dir, contract = gate._load_active()
     gate._require_executable(state)
@@ -124,6 +134,12 @@ def record_check(gate: Any, check_id: str, result: str, candidate: str,
         raise GateError("Check candidate is stale; inspect the current candidate before recording new evidence")
     if check["kind"] == "manual" and result == "passed" and not any(Path(path).suffix.lower() in (".png", ".jpg", ".jpeg", ".webp") for path in paths):
         raise GateError("A passed AI-assisted manual check requires screenshot evidence")
+    from .method_adapters.zsspec_docs import enabled as docs
+    verified = None
+    if docs(contract) and check["kind"] == "manual" and result == "passed":
+        from .services.observations import validate
+        verified = validate(gate, state, contract, check, observations, current, paths)
+        paths = list(dict.fromkeys([*paths, observations]))
     evidence = snapshot_files(gate, state, contract, paths, "check-evidence")
     if gate._candidate(state, contract)["sha256"] != current:
         raise GateError("Candidate changed during check capture")
@@ -131,6 +147,8 @@ def record_check(gate: Any, check_id: str, result: str, candidate: str,
               "kind": check["kind"], "result": result, "source": "ai_coordinator_attestation",
               "reviewer": reviewer.strip(), "reason": reason.strip(), "evidence": evidence,
               "candidate_sha256": current, "evidence_epoch": state.get("evidence_epoch", 0), "recorded_at": utc_now()}
+    if verified is not None:
+        record["observations"] = verified
     records = state.setdefault("check_results", [])
     path = run_dir / "check-results" / f"{len(records) + 1:03d}.json"
     write_json_atomic(path, record)
@@ -154,5 +172,8 @@ def attestation_status(gate: Any, state: dict, check: dict, candidate: str) -> d
             status = "invalid"
         elif record["candidate_sha256"] != candidate or record["evidence_epoch"] != state.get("evidence_epoch", 0):
             status = "stale"
+        else:
+            if state.get("method_preparation") and check["kind"] == "manual" and status == "passed" and not record.get("observations"):
+                status = "missing_scenario_observations"
     return {"id": check["id"], "kind": check["kind"], "suite": check["kind"], "target": None,
             "status": status, "source": "ai_coordinator_attestation", "evidence_path": record["path"] if record else None}

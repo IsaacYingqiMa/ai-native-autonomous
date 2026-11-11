@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AIDevFlow native invocation v3",
+  "type": "object",
+  "required": [
+    "id",
+    "receipt_schema",
+    "runtime",
+    "task_id",
+    "role",
+    "context",
+    "input_digest",
+    "dispatch_observed",
+    "execution_finished",
+    "status"
+  ],
+  "properties": {
+    "receipt_schema": {
+      "const": "aidevflow/invocation-v3"
+    },
+    "runtime": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "role": {
+      "enum": [
+        "intent_analyst",
+        "requirements_analyst",
+        "contract_planner",
+        "artifact_reviewer",
+        "verifier"
+      ]
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "dispatched",
+        "execution_failed",
+        "identity_conflict",
+        "invalid_output",
+        "missing_output",
+        "stale",
+        "started"
+      ]
+    },
+    "dispatch_observed": {
+      "type": "boolean"
+    },
+    "execution_finished": {
+      "type": "boolean"
+    },
+    "context": {
+      "type": "object"
+    },
+    "input_digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "additionalProperties": true
+}

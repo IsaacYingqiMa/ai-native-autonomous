@@ -1,3 +1,5 @@
+> 历史协议/验证记录：当前五技能包的 OMP 流程见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [README.md](README.md)。旧记录不代表当前版本已通过。
+
 # Observer B2：运行兼容性修复与重新验证
 
 本次针对 ai-native-dashboard 的 Claude Code 2.1.311 会话排查修改框架源码，不修改该业务项目，不删除其记录，不修改 zsspec 完整技能包 v1.4。README 的文档版本 v1.18、方法规则标识 zsspec-managed-v1 与框架观察器版本互相独立。

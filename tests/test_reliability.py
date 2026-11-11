@@ -352,7 +352,7 @@ class InstallationAndHookTests(GateFixture):
         settings = json.loads((self.root / ".claude/settings.json").read_text(encoding="utf-8"))
         self.assertEqual(len(settings["hooks"]["SubagentStart"]), 1)
         self.assertIn("SubagentStop", settings["hooks"])
-        self.assertTrue((self.root / ".aidevflow/runtime/aidevflow/adapters.py").is_file())
+        self.assertTrue((self.root / ".aidevflow/engine/python/aidevflow/adapters.py").is_file())
         self.assertEqual(self.gate.status()["task_id"], "TEST-1")
 
     def test_large_utf8_write_input_reaches_scope_guard(self):

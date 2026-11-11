@@ -358,7 +358,7 @@ class ManagedValidationTests(unittest.TestCase):
         self.assertEqual(available_skill_errors(Path(__file__).resolve().parents[1], self.example), [])
 
     def test_evidence_cannot_hide_product_or_frozen_files(self):
-        for prefix in ("src", "specs/requirement", ".aidevflow/x", "../reports", "reports/*"):
+        for prefix in ("src", "specs/active", ".aidevflow/x", "../reports", "reports/*"):
             contract = copy.deepcopy(self.example)
             contract["evidence_paths"] = [prefix]
             self.assertTrue(validate_contract(contract), prefix)

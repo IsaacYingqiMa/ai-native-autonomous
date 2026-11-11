@@ -16,10 +16,17 @@ from pathlib import Path
 
 
 class DiscoveryTests(GateFixture):
+    RUNTIME = "omp"
+    NATIVE = ".omp"
+
+    def observe(self, root, payload):
+        from aidevflow.runtimes.registry import get_runtime
+        return get_runtime(self.RUNTIME).observe(root, payload)
+
     def setUp(self):
         super().setUp()
         self.gate.active_path.unlink()
-        self._write_json('.aidevflow/project.json', {'runtime': 'omp', 'workflow_profile': PROFILE})
+        self._write_json('.aidevflow/project.json', {'runtime': self.RUNTIME, 'workflow_profile': PROFILE})
         (self.root / 'request.md').write_text('Return one. No extra features.', encoding='utf-8')
         self.discovery = Discovery(self.root)
         self.discovery.create('request.md')
@@ -34,8 +41,8 @@ class DiscoveryTests(GateFixture):
         value = self.value if value is None else value
         request = {'type': 'tool_call', 'session_id': 's1', 'toolCallId': call,
                    'input': {'agent': 'aidevflow-requirements-analyst', 'task': 'requirements', 'solutionSpace': 'bounded'}}
-        observe(self.root, request)
-        receipt = observe(self.root, {**request, 'type': 'tool_result', 'details': {'results': [
+        self.observe(self.root, request)
+        receipt = self.observe(self.root, {**request, 'type': 'tool_result', 'details': {'results': [
             {'id': 'agent-' + call, 'agent': 'aidevflow-requirements-analyst', 'exitCode': 0,
              'structuredOutput': {'status': 'valid', 'data': value}}]}})
         return self.discovery.record(receipt['result_path'])
@@ -171,9 +178,9 @@ class DiscoveryTests(GateFixture):
     def test_old_native_result_cannot_be_used_after_context_revision(self):
         request = {'type': 'tool_call', 'session_id': 's1', 'toolCallId': 'stale',
                    'input': {'agent': 'aidevflow-requirements-analyst', 'task': 'prepare'}}
-        observe(self.root, request)
+        self.observe(self.root, request)
         self.discovery.revise('New material changes the discussion')
-        receipt = observe(self.root, {**request, 'type': 'tool_result', 'details': {'results': [
+        receipt = self.observe(self.root, {**request, 'type': 'tool_result', 'details': {'results': [
             {'id': 'stale-agent', 'agent': 'aidevflow-requirements-analyst', 'exitCode': 0,
              'structuredOutput': {'status': 'valid', 'data': self.value}}]}})
         self.assertEqual(receipt['status'], 'stale')
@@ -181,9 +188,9 @@ class DiscoveryTests(GateFixture):
     def test_install_retains_active_profile_and_installs_native_schema(self):
         source = Path(__file__).resolve().parents[1]
         with self.assertRaisesRegex(GateError, 'active context'):
-            install(source, self.root, 'omp', workflow_profile='legacy')
-        install(source, self.root, 'omp', workflow_profile=PROFILE)
-        role = (self.root / '.omp/agents/aidevflow-requirements-analyst.md').read_text(encoding='utf-8')
+            install(source, self.root, self.RUNTIME, workflow_profile='legacy')
+        install(source, self.root, self.RUNTIME, workflow_profile=PROFILE)
+        role = (self.root / (self.NATIVE + "/agents/aidevflow-requirements-analyst.md")).read_text(encoding='utf-8')
         self.assertIn('aidevflow/requirements-v1', role)
         self.assertEqual(read_json(self.root / '.aidevflow/project.json')['workflow_profile'], PROFILE)
 
@@ -207,8 +214,8 @@ class DiscoveryTests(GateFixture):
                         {'id': 'CHECK-1', 'suite': 'green', 'target': 'tests/test_feature.py', 'acceptance_items': ['REQ-1']}]}
         request = {'type': 'tool_call', 'session_id': 's1', 'toolCallId': 'planner',
                    'input': {'agent': 'aidevflow-contract-planner', 'task': 'plan approved requirements'}}
-        observe(self.root, request)
-        receipt = observe(self.root, {**request, 'type': 'tool_result', 'details': {'results': [
+        self.observe(self.root, request)
+        receipt = self.observe(self.root, {**request, 'type': 'tool_result', 'details': {'results': [
             {'id': 'planner-agent', 'agent': 'aidevflow-contract-planner', 'exitCode': 0,
              'structuredOutput': {'status': 'valid', 'data': contract}}]}})
         self.gate.register_contract(receipt['result_path'])

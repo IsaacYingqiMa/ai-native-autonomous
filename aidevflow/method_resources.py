@@ -7,7 +7,7 @@ from typing import Any
 
 from .gate import GateError
 
-ROOTS = (".omp/skills", ".claude/skills")
+ROOTS = (".omp/skills", ".zscode/skills", ".claude/skills", ".aidevflow/methods/zsspec")
 MAINTENANCE_SKILLS = {"zsspec-doctor"}
 
 
@@ -47,10 +47,12 @@ def installation_root(root: Path, runtime: str, config: dict[str, Any], requeste
         return local_root(root, value).relative_to(root.resolve()).as_posix()
     found = [rel for rel, names in candidates(root).items() if names]
     if len(found) > 1:
-        raise GateError("Multiple method roots found; install with --skills-root .omp/skills or .claude/skills")
+        raise GateError("Multiple method roots found; install with an explicit --skills-root")
     if found:
         return found[0]
-    return local_root(root, value or (".omp/skills" if runtime == "omp" else ".claude/skills")).relative_to(root.resolve()).as_posix()
+    from .runtimes.registry import get_runtime
+    native = get_runtime(runtime).native_root
+    return local_root(root, value or f"{native}/skills").relative_to(root.resolve()).as_posix()
 
 
 def source_status(root: Path) -> dict[str, Any]:
@@ -73,9 +75,12 @@ def managed_context(stage: str) -> str:
         "Read the method instructions and perform their applicable engineering work; loading is not completion. "
         "The approved Intent, Contract and Gate own scope and acceptance. Review ordinary artifacts as AI coordinator "
         "within the user's authorization; never invent human approval. Escalate material scope/risk/acceptance changes. "
-        "Gate alone writes mapped REQ/TASK/CHK status cells. After Design, frozen tests and specifications cannot be repaired "
-        "by a method skill; report a baseline issue instead. Reuse a passing check only when Gate reports it fresh. "
-        "Perform all static review dimensions serially in the coordinator; do not spawn vendor-named reviewers or parallel workers. "
+        "Follow the pinned method policy and status.next_actions for artifact reviews, task tests and engineering revisions. "
+        "Ordinary engineering fixes and provably wrong frozen test assertions need no new human approval: use independently reviewed begin-engineering-revision drafts. "
+        "For runtime checks use check-context and record-check --observations to cover the full approved scenarios and combined states. "
+        "Gate alone writes progress projections; never weaken frozen assertions or edit approved business materials. "
+        "Reuse a passing check only when Gate reports it fresh. Schedule work serially through Gate and its registered "
+        "independent roles; do not spawn vendor-named reviewers or arbitrary parallel workers. "
         "For auto browser checks run the installed aidevflow_browser.py plan runner through Gate run-tests. "
         "For manual AI-assisted checks, the managed equivalent of chrome-devtools-mcp is an isolated Playwright browser: "
         "execute the declared steps, inspect the actual screenshots, and record-check honestly with fresh candidate and evidence. "
@@ -128,7 +133,8 @@ def load_resource(root: Path, inp: dict[str, Any]) -> dict[str, Any] | None:
     if not target.is_relative_to(method_source) or not target.is_file():
         raise GateError(f"Method resource is missing from the pinned source: {rel}")
     state, _, _ = Gate(root)._load_active()
-    if selected(root, state) != "omp":
+    from .runtimes.registry import get_runtime
+    if not get_runtime(selected(root, state)).resource_redirection:
         raise GateError("Resume this task in its bound runtime")
     policy = {}
     if state.get("method_policy"):
@@ -136,15 +142,37 @@ def load_resource(root: Path, inp: dict[str, Any]) -> dict[str, Any] | None:
         expected = policy["package"]["files"].get(rel.as_posix())
         if expected is None or sha256_file(target) != expected:
             raise GateError("Method resource is unpinned or changed; preserve the task and inspect method integrity")
+    if state.get("method_preparation") and not policy:
+        from .services.design import preparation
+        prepared = preparation(Gate(root), state)
+        expected = prepared["package"]["files"].get(rel.as_posix())
+        if expected is None or sha256_file(target) != expected:
+            raise GateError("Prepared method resource changed")
     context = managed_context(state["current_stage"])
+    from .method_adapters.zsspec_docs import enabled as docs, PROFILE
+    if state.get("method_preparation") or policy.get("profile") == PROFILE:
+        from .services.design import preparation
+        prep = preparation(Gate(root), state)
+        context = (f"AIDevFlow approved-requirements managed execution. Current change {prep['slug']}; "
+                   f"only write {prep['spec']} in spec and {prep['plan']} in plan. Approved Intent/PRD and "
+                   "acceptance IDs are immutable business truth. Demand/value questioning, scope pruning and "
+                   "already resolved choices happened before approval: skip them. Do not reinterpret approved scope. "
+                   "Expected changes to old code are not conflicts. Decide ordinary engineering details autonomously; "
+                   "report genuinely new business decisions to Gate without changing approved files. "
+                   "The current managed scheduler is serial: one Gate work item at a time. Replace vendor parallel worker dispatch with that order; never dispatch arbitrary workers. "
+                   "Stage reports do not pause or authorize the next stage: return to Gate checkpoints and its "
+                   "independent spec/plan reviews. Gate alone writes progress slots. Generate/review/freeze tests "
+                   "per active Build task; never weaken assertions. Proven mistakes in frozen tests use begin-engineering-revision drafts and independent review without another human approval. "
+                   "Runtime/manual checks require check-context and record-check --observations for every approved scenario, including interacting states. "
+                   "Ordinary acceptance failures route back to repair; technical retry limits are not requests to approve bug fixing. Recover native executions before retrying. "
+                   "Archive only in the Gate-prepared disposable workspace; final delivery needs independent acceptance. "
+                   "Never run old zsspec_check.py or load removed req/test/done/standard/change skills.")
     if policy.get("profile") == "zsspec-managed-v2":
         context += (" Managed v2: Gate owns execution facts; only method-run and sync-projections may call the native "
                     "status writer. Ordinary design/test-code reviews are delegated to AI with recorded evidence; "
                     "never claim human review. Use req then plan (DES/TASK/CHK); no legacy des/task/chk/verify Skills. "
                     "Run method-run verify/gate, baseline with --evidence, and sync-projections after work/check updates. "
                     "Never directly run zsspec_check.py on live specs. Native done/close waits for actual user acceptance.")
-        context = context.replace("Gate alone writes mapped REQ/TASK/CHK status cells.",
-                                  "The scripted adapter alone synchronizes mapped REQ/TASK/CHK through native commands.")
     return {"input": {**inp, "path": str(target) + span},
             "additionalContext": context,
             "source": {"path": str(target), "sha256": sha256_file(target)}}

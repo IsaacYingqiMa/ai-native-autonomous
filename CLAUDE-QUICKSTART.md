@@ -1,3 +1,5 @@
+> 历史协议/验证记录：当前五技能包的 OMP 流程见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [README.md](README.md)。旧记录不代表当前版本已通过。
+
 # AIDevFlow：Claude Code 使用指南
 
 本文保留 Claude 后端的完整流程。当前新安装默认 omp，本文所有安装和升级命令请显式增加 `--runtime claude-code`；活动任务不会因默认值变化而切换执行器。

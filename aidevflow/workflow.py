@@ -36,9 +36,16 @@ class Workflow:
         gate = Gate(self.root)
         if gate.active_path.exists():
             state, _, _ = gate._load_active()
-            if discussion_only:
-                return {"action": "delivery_active", "task_id": state["task_id"], "status": state["status"]}
-            return {"action": "deliver", "task_id": state["task_id"], "status": state["status"], "user_text": text}
+            if state["current_stage"] == "delivery_ready":
+                if not text.strip() or text.strip().lower() in ("继续", "resume", "continue", "继续执行"):
+                    return {"action": "delivery_complete", "task_id": state["task_id"], "status": state["status"]}
+                # An explicit new request through the same native entry closes
+                # the completed context; history and its approval stay intact.
+                gate.archive()
+            else:
+                if discussion_only:
+                    return {"action": "delivery_active", "task_id": state["task_id"], "status": state["status"]}
+                return {"action": "deliver", "task_id": state["task_id"], "status": state["status"], "user_text": text}
         if not self.discovery.active.exists():
             if not text.strip():
                 return {"action": "request_needed"}
@@ -182,8 +189,9 @@ class Workflow:
             self._feedback(state, current, feedback, interaction=interaction)
             result = {"action": "discuss"}
         else:
+            from .runtimes import selected
             approved = self.discovery.approve(discovery_id, record["requirements_revision"], record["manifest_sha256"],
-                                              "omp user", "确认并开始自主开发" if choice == "approve_start" else "确认，仅保存需求",
+                                              selected(self.root) + " user", "确认并开始自主开发" if choice == "approve_start" else "确认，仅保存需求",
                                               "native_review_choice", delivery_authorized=choice == "approve_start")
             result = ({"action": "deliver", **self.discovery.start_delivery()} if choice == "approve_start"
                       else {"action": "approved_saved", "requirements_ref": approved["requirements_ref"]})

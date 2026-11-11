@@ -8,7 +8,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+
+def _runtime_schema_matches(entry, runtime):
+    if runtime is None:
+        return True
+    from .runtimes.registry import get_runtime
+    required = get_runtime(runtime).receipt_schema
+    return required is None or entry.get("receipt_schema") == required
+
 ROLE_ALIASES = {
+    "aidevflow-artifact-reviewer": "artifact_reviewer",
     "aidevflow-requirements-analyst": "requirements_analyst",
     "aidevflow-intent-analyst": "intent_analyst",
     "aidevflow-contract-planner": "contract_planner",
@@ -25,6 +34,8 @@ def execution_context(state: dict[str, Any]) -> dict[str, Any]:
             "bundle_sha256": bundle.get("sha256"), "candidate_sha256": bundle.get("candidate_sha256")}
     if state.get("current_stage") == "discovery":
         context.update(discovery_id=state["task_id"], discovery_revision=state["revision"])
+    if state.get("artifact_review_target"):
+        context["artifact_review_target"] = state["artifact_review_target"]
     if state.get("requirements_ref"):
         context["requirements_ref"] = state["requirements_ref"]
     return context
@@ -38,7 +49,7 @@ def completed_results(entries: list[dict[str, Any]], role: str, digest: str,
             if entry.get("role", ROLE_ALIASES.get(entry.get("agent_type"))) == role
             and (runtime is None or entry.get("runtime", "claude-code") == runtime)
             and entry.get("receipt_schema") in (None, "aidevflow/invocation-v1", "aidevflow/invocation-v2", "aidevflow/invocation-v3")
-            and (runtime != "omp" or entry.get("receipt_schema") == "aidevflow/invocation-v3")
+            and _runtime_schema_matches(entry, runtime)
             and entry.get("status") == "completed"
             and entry.get("result_sha256") == digest
             and entry.get("evidence_epoch", 0) == epoch
